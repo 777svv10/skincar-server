@@ -52,3 +52,10 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
  delta INTEGER NOT NULL,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS nickname_changes (
+ id BIGSERIAL PRIMARY KEY,
+ telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+ changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS nickname_changes_owner_time ON nickname_changes(telegram_id,changed_at);

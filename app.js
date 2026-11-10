@@ -1,7 +1,7 @@
 import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import {enqueue,imageOf,optionsOf,viewJob,uuid,grantPilot} from './generations.js';
 import {validateInitData} from './auth.js';
-import {normalizeNickname,claimNickname} from './nickname.js';
+import {normalizeNickname,claimNickname,nicknameQuota} from './nickname.js';
 export function createHandler(db,config=process.env){
 const {BOT_TOKEN,WEBHOOK_SECRET}=config;
 const APP_URL=config.APP_URL||'https://skincar01.netlify.app/';
@@ -68,11 +68,12 @@ return async(req,res)=>{
         res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, no-store','Content-Length':media.length});return res.end(media);
       }
     }
+    if(path==='/api/me/nickname'&&req.method==='GET')return reply(res,200,{quota:await nicknameQuota(db,user.telegram_id)});
     if(path==='/api/me/nickname'&&req.method==='POST'){
       const b=await body(req);
       const result=await claimNickname(db,user.telegram_id,b.nickname);
-      if(result.status!==200)return reply(res,result.status,{code:result.code,error:result.code==='NICKNAME_TAKEN'?'Этот ник занят в SkinCar':'Используй 3–24 символа: латинские буквы, цифры и _. Служебные имена недоступны.'});
-      return reply(res,200,{user:view(result.user)});
+      if(result.status!==200)return reply(res,result.status,{code:result.code,quota:result.quota,error:result.code==='NICKNAME_TAKEN'?'Этот ник занят в SkinCar':'Используй 3–24 символа: латинские буквы, цифры и _. Служебные имена недоступны.'});
+      return reply(res,200,{user:view(result.user),quota:result.quota});
     }
     if(path==='/api/me'&&req.method==='GET')return reply(res,200,{user:view(user)});
     if(path==='/api/me'&&req.method==='PATCH'){
