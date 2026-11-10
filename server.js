@@ -3,6 +3,7 @@ import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import pg from 'pg';
 import {validateInitData} from './auth.js';
+import {normalizeNickname,claimNickname} from './nickname.js';
 const {BOT_TOKEN,DATABASE_URL,WEBHOOK_SECRET}=process.env;
 const APP_URL=process.env.APP_URL||'https://skincar01.netlify.app/';
 const ORIGIN=new URL(APP_URL).origin;
@@ -13,7 +14,7 @@ const digest=s=>createHash('sha256').update(s).digest('hex');
 const reply=(res,status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data))};
 async function body(req){let size=0,parts=[];for await(const chunk of req){size+=chunk.length;if(size>32768)throw Error('Body too large');parts.push(chunk)}return JSON.parse(Buffer.concat(parts).toString()||'{}')}
 async function telegram(method,data){const r=await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),signal:AbortSignal.timeout(10000)});const json=await r.json();if(!json.ok)throw Error('Telegram request failed');return json.result}
-const view=u=>({id:u.telegram_id,displayName:u.display_name,lang:u.lang,theme:u.theme,balance:u.balance});
+const view=u=>({id:u.telegram_id,displayName:u.display_name,lang:u.lang,theme:u.theme,balance:u.balance,nickname:u.nickname,nicknameRequired:!u.nickname,suggestedNickname:normalizeNickname(u.telegram_username)});
 http.createServer(async(req,res)=>{
   const path=new URL(req.url,'http://localhost').pathname;
   if(req.headers.origin&&req.headers.origin!==ORIGIN)return reply(res,403,{error:'Origin denied'});
@@ -33,7 +34,7 @@ http.createServer(async(req,res)=>{
       const b=await body(req);let user;
       try{user=validateInitData(b.initData,BOT_TOKEN)}catch{return reply(res,401,{error:'Открой приложение заново через Telegram'})}
       const lang=['ru','kk','en'].includes(user.language_code)?user.language_code:'ru';
-      const {rows}=await db.query(`INSERT INTO users(telegram_id,display_name,lang) VALUES($1,$2,$3) ON CONFLICT(telegram_id) DO UPDATE SET updated_at=now() RETURNING *`,[user.id,String(user.first_name||'SkinCar User').slice(0,80),lang]);
+      const {rows}=await db.query(`INSERT INTO users(telegram_id,display_name,lang,telegram_username) VALUES($1,$2,$3,$4) ON CONFLICT(telegram_id) DO UPDATE SET telegram_username=EXCLUDED.telegram_username,updated_at=now() RETURNING *`,[user.id,String(user.first_name||'SkinCar User').slice(0,80),lang,typeof user.username==='string'?user.username.slice(0,64):null]);
       const session=randomBytes(32).toString('hex');
       await db.query(`INSERT INTO sessions(token_hash,telegram_id) VALUES($1,$2)`,[digest(session),user.id]);
       return reply(res,200,{session,user:view(rows[0]),expiresIn:86400});
@@ -42,6 +43,12 @@ http.createServer(async(req,res)=>{
     if(!bearer)return reply(res,401,{error:'Login required'});
     const {rows}=await db.query(`SELECT u.* FROM sessions s JOIN users u USING(telegram_id) WHERE s.token_hash=$1 AND s.expires_at>now()`,[digest(bearer[1])]);
     const user=rows[0];if(!user)return reply(res,401,{error:'Session expired'});
+    if(path==='/api/me/nickname'&&req.method==='POST'){
+      const b=await body(req);
+      const result=await claimNickname(db,user.telegram_id,b.nickname);
+      if(result.status!==200)return reply(res,result.status,{code:result.code,error:result.code==='NICKNAME_TAKEN'?'Этот ник занят в SkinCar':'Используй 3–24 символа: латинские буквы, цифры и _. Служебные имена недоступны.'});
+      return reply(res,200,{user:view(result.user)});
+    }
     if(path==='/api/me'&&req.method==='GET')return reply(res,200,{user:view(user)});
     if(path==='/api/me'&&req.method==='PATCH'){
       const b=await body(req);
@@ -56,3 +63,4 @@ http.createServer(async(req,res)=>{
   }catch(error){console.error('Request failed:',error.name);return reply(res,500,{error:'Server error'})}
 }).listen(Number(process.env.PORT)||3000,'0.0.0.0',()=>console.log('SkinCar server ready'));
 setInterval(()=>db.query('DELETE FROM sessions WHERE expires_at < now()').catch(()=>{}),3600000).unref();
+

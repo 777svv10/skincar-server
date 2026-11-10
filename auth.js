@@ -15,3 +15,4 @@ export function validateInitData(raw, token, now = Math.floor(Date.now()/1000)) 
   if(!user||!Number.isSafeInteger(user.id)||user.id<=0) throw Error('Invalid user');
   return user;
 }
+

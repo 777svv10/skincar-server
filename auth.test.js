@@ -10,3 +10,4 @@ test('rejects wrong bot',()=>assert.throws(()=>validateInitData(signed(),'other'
 test('rejects expired login',()=>assert.throws(()=>validateInitData(signed(now-601),token,now)));
 test('rejects future login',()=>assert.throws(()=>validateInitData(signed(now+31),token,now)));
 test('rejects duplicate fields',()=>assert.throws(()=>validateInitData(signed()+'&auth_date='+now,token,now)));
+
