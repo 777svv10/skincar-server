@@ -13,3 +13,4 @@ test('only authenticated account id is used to claim nickname',async()=>{
  const db={query:async(sql,args)=>{assert.deepEqual(args,[123,'street_e36']);return {rows:[{telegram_id:123,nickname:args[1]}]}}};
  assert.equal((await claimNickname(db,123,'Street_E36')).user.nickname,'street_e36');
 });
+

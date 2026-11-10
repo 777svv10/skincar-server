@@ -11,3 +11,4 @@ test('rejects expired login',()=>assert.throws(()=>validateInitData(signed(now-6
 test('rejects future login',()=>assert.throws(()=>validateInitData(signed(now+31),token,now)));
 test('rejects duplicate fields',()=>assert.throws(()=>validateInitData(signed()+'&auth_date='+now,token,now)));
 
+

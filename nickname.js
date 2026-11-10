@@ -15,3 +15,4 @@ export async function claimNickname(db, userId, value) {
     throw error;
   }
 }
+
