@@ -43,7 +43,7 @@ return async(req,res)=>{
     const user=rows[0];if(!user)return reply(res,401,{error:'Session expired'});
     if(path==='/api/generations'&&req.method==='POST'){
       if(!process.env.OPENAI_API_KEY)return reply(res,503,{code:'GENERATION_DISABLED'});
-      const b=await body(req,4*1024*1024+2048);
+      const b=await body(req,4*1024*1024+8192);
       const options=optionsOf(b.options),source=await imageOf(b.image);
       return reply(res,202,await enqueue(db,user.telegram_id,b.requestKey,source,options));
     }
