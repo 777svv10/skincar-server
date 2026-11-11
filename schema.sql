@@ -77,3 +77,15 @@ CREATE TABLE IF NOT EXISTS payment_receipts (
  charge_id TEXT PRIMARY KEY,order_id UUID NOT NULL REFERENCES payment_orders(id),telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
  stars INTEGER NOT NULL,credits INTEGER NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),refunded_at TIMESTAMPTZ
 );
+
+-- Per-photo, server-timestamped consent audit. Existing photos are not auto-consented.
+CREATE TABLE IF NOT EXISTS photo_consents (
+ id UUID PRIMARY KEY,telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
+ vehicle_id UUID NOT NULL REFERENCES vehicles(id),
+ input_hash TEXT NOT NULL,source_hash TEXT NOT NULL,
+ text_version TEXT NOT NULL,text_snapshot TEXT NOT NULL,language TEXT NOT NULL,
+ privacy_version TEXT NOT NULL,terms_version TEXT NOT NULL,
+ accepted BOOLEAN NOT NULL DEFAULT true CHECK(accepted),
+ accepted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS photo_consents_owner ON photo_consents(telegram_id,vehicle_id);
