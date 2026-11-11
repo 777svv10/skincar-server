@@ -1,4 +1,4 @@
-import {requireConsent,recordConsent,verifyConsent,imageHashes} from './consent.js';
+import {requireConsent,recordConsent,verifyConsent,imageHashes,CONSENT_VERSION} from './consent.js';
 import {catalog,createInvoice,checkCheckout,settlePayment,applyRefund} from './payments.js';
 import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import {enqueue,imageOf,optionsOf,viewJob,uuid,grantPilot} from './generations.js';
@@ -62,6 +62,20 @@ return async(req,res)=>{
        const count=(await c.query('SELECT count(*) AS n FROM vehicles WHERE telegram_id=$1',[user.telegram_id])).rows[0];if(Number(count.n)>=20)throw Object.assign(Error(),{status:429,code:'VEHICLE_LIMIT'});
        const vehicle=(await c.query('INSERT INTO vehicles(id,telegram_id,name,source_image,original_image,original_mime) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name',[b.id,user.telegram_id,name,source,Buffer.from(b.image.split(',')[1],'base64'),b.image.slice(5,b.image.indexOf(';'))])).rows[0];const consent=await recordConsent(c,user.telegram_id,b.id,b.image,source,b.consent);await c.query('COMMIT');return reply(res,201,{vehicle,consent});
       }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+    }
+    // SK-047..049: reusing an owner's original photo requires the existing consent,
+    // not an anonymous vehicle ID or a newly fabricated agreement.
+    const vehicleReusePath=/^\/api\/vehicles\/([a-f0-9-]+)\/reuse$/.exec(path);
+    if(vehicleReusePath&&req.method==='GET'){
+      if(!uuid(vehicleReusePath[1]))return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+      const vehicle=(await db.query('SELECT id,name,source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[vehicleReusePath[1],user.telegram_id])).rows[0];
+      if(!vehicle)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+      const consent=(await db.query(`SELECT id FROM photo_consents
+        WHERE vehicle_id=$1 AND telegram_id=$2 AND accepted=true
+          AND text_version=$4 AND source_hash=$3
+        ORDER BY accepted_at DESC LIMIT 1`,[vehicle.id,user.telegram_id,digest(vehicle.source_image),CONSENT_VERSION])).rows[0];
+      if(!consent)return reply(res,409,{code:'PHOTO_CONSENT_REQUIRED'});
+      return reply(res,200,{vehicle:{id:vehicle.id,name:vehicle.name},consentId:consent.id});
     }
     const vehiclePath=/^\/api\/vehicles\/([a-f0-9-]+)\/source$/.exec(path);
     if(vehiclePath&&req.method==='GET'){if(!uuid(vehiclePath[1]))return reply(res,404,{});const v=(await db.query("SELECT COALESCE(original_image,source_image) AS source_image,COALESCE(original_mime,'image/jpeg') AS mime FROM vehicles WHERE id=$1 AND telegram_id=$2",[vehiclePath[1],user.telegram_id])).rows[0];if(!v)return reply(res,404,{});res.writeHead(200,{'Content-Type':v.mime,'Cache-Control':'private, no-store'});return res.end(v.source_image);}
