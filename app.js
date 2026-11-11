@@ -53,21 +53,21 @@ return async(req,res)=>{
     if(path==='/api/payments/history'&&req.method==='GET'){const r=await db.query('SELECT r.order_id,r.stars,r.credits,r.created_at,r.refunded_at FROM payment_receipts r WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 50',[user.telegram_id]);return reply(res,200,{purchases:r.rows,balance:user.balance});}
     if(path==='/api/vehicles'&&req.method==='GET'){return reply(res,200,{vehicles:(await db.query('SELECT id,name,created_at FROM vehicles WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 20',[user.telegram_id])).rows});}
     if(path==='/api/vehicles'&&req.method==='POST'){
-      const b=await body(req,4*1024*1024+8192);const name=typeof b.name==='string'?b.name.trim().replace(/\s+/g,' '):'';
+      const b=await body(req,15*1024*1024+8192);const name=typeof b.name==='string'?b.name.trim().replace(/\s+/g,' '):'';
       if(!uuid(b.id)||name.length<2||name.length>80||/[\x00-\x1f<>]/.test(name))return reply(res,400,{code:'INVALID_VEHICLE'});
       requireConsent(b.consent);const source=await imageOf(b.image);
       const c=await db.connect();try{await c.query('BEGIN');await c.query('SELECT telegram_id FROM users WHERE telegram_id=$1 FOR UPDATE',[user.telegram_id]);
        const existing=(await c.query('SELECT id,name,source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[b.id,user.telegram_id])).rows[0];
        if(existing){const h=imageHashes(b.image,source);if(!h.includes(digest(existing.source_image)))throw Object.assign(Error(),{status:409,code:'PHOTO_MISMATCH'});const consent=await recordConsent(c,user.telegram_id,b.id,b.image,source,b.consent);await c.query('COMMIT');return reply(res,200,{vehicle:{id:existing.id,name:existing.name},consent});}
        const count=(await c.query('SELECT count(*) AS n FROM vehicles WHERE telegram_id=$1',[user.telegram_id])).rows[0];if(Number(count.n)>=20)throw Object.assign(Error(),{status:429,code:'VEHICLE_LIMIT'});
-       const vehicle=(await c.query('INSERT INTO vehicles(id,telegram_id,name,source_image) VALUES($1,$2,$3,$4) RETURNING id,name',[b.id,user.telegram_id,name,source])).rows[0];const consent=await recordConsent(c,user.telegram_id,b.id,b.image,source,b.consent);await c.query('COMMIT');return reply(res,201,{vehicle,consent});
+       const vehicle=(await c.query('INSERT INTO vehicles(id,telegram_id,name,source_image,original_image,original_mime) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name',[b.id,user.telegram_id,name,source,Buffer.from(b.image.split(',')[1],'base64'),b.image.slice(5,b.image.indexOf(';'))])).rows[0];const consent=await recordConsent(c,user.telegram_id,b.id,b.image,source,b.consent);await c.query('COMMIT');return reply(res,201,{vehicle,consent});
       }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
     }
     const vehiclePath=/^\/api\/vehicles\/([a-f0-9-]+)\/source$/.exec(path);
-    if(vehiclePath&&req.method==='GET'){if(!uuid(vehiclePath[1]))return reply(res,404,{});const v=(await db.query('SELECT source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[vehiclePath[1],user.telegram_id])).rows[0];if(!v)return reply(res,404,{});res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, no-store'});return res.end(v.source_image);}
+    if(vehiclePath&&req.method==='GET'){if(!uuid(vehiclePath[1]))return reply(res,404,{});const v=(await db.query("SELECT COALESCE(original_image,source_image) AS source_image,COALESCE(original_mime,'image/jpeg') AS mime FROM vehicles WHERE id=$1 AND telegram_id=$2",[vehiclePath[1],user.telegram_id])).rows[0];if(!v)return reply(res,404,{});res.writeHead(200,{'Content-Type':v.mime,'Cache-Control':'private, no-store'});return res.end(v.source_image);}
     if(path==='/api/generations'&&req.method==='POST'){
       if(!process.env.OPENAI_API_KEY)return reply(res,503,{code:'GENERATION_DISABLED'});
-      const b=await body(req,4*1024*1024+8192);
+      const b=await body(req,15*1024*1024+8192);
       if(!uuid(b.consentId)||!uuid(b.options?.vehicleId))return reply(res,400,{code:'PHOTO_CONSENT_REQUIRED'});const options=optionsOf(b.options),source=await imageOf(b.image);await verifyConsent(db,user.telegram_id,b.consentId,options.vehicleId,b.image,source);options.photoConsentId=b.consentId;
       if(options.vehicleId){const v=(await db.query('SELECT name FROM vehicles WHERE id=$1 AND telegram_id=$2',[options.vehicleId,user.telegram_id])).rows[0];if(!v)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});options.vehicleName=v.name;}
       return reply(res,202,await enqueue(db,user.telegram_id,b.requestKey,source,options));

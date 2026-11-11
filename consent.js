@@ -1,6 +1,6 @@
 import {createHash,randomUUID} from 'node:crypto';
 export const CONSENT_VERSION='photo-2026-11-11-v1';
-export const LEGAL_VERSION='2026-11-11-draft1';
+export const LEGAL_VERSION='2026-11-11-draft2';
 export const CONSENT_TEXT={
 ru:'Подтверждаю, что имею право использовать загруженную фотографию, и соглашаюсь на её обработку для создания проекта SkinCar.',
 en:'I confirm that I have the right to use the uploaded photograph and consent to its processing to create a SkinCar project.',

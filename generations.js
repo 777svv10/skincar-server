@@ -21,8 +21,9 @@ export async function moderateCustom(text,fetcher=fetch){
  if(!r.ok)throw problem(503,'MODERATION_UNAVAILABLE');const j=await r.json();if(typeof j.results?.[0]?.flagged!=='boolean')throw problem(503,'MODERATION_UNAVAILABLE');if(j.results[0].flagged)throw problem(400,'CONTENT_BLOCKED');
 }
 export async function imageOf(data){
- if(typeof data!=='string'||data.length>4*1024*1024)throw problem(413,'IMAGE_TOO_LARGE');
+ if(typeof data!=='string'||data.length>15*1024*1024)throw problem(413,'IMAGE_TOO_LARGE');
  const m=/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(data);if(!m)throw problem(400,'INVALID_IMAGE');
+ if(Buffer.from(m[2],'base64').length>10*1024*1024)throw problem(413,'IMAGE_TOO_LARGE');
  try{const image=sharp(Buffer.from(m[2],'base64'),{limitInputPixels:40000000,failOn:'error'});const meta=await image.metadata();if(!['jpeg','png','webp'].includes(meta.format)||meta.pages>1||meta.width<256||meta.height<256)throw Error();const output=await image.rotate().resize(1600,1600,{fit:'inside',withoutEnlargement:true}).flatten({background:'#fff'}).jpeg({quality:88}).toBuffer();if(output.length>3*1024*1024)throw Error();return output;}catch{throw problem(400,'INVALID_IMAGE');}
 }
 export const viewJob=j=>({id:j.id,status:j.status,options:j.options,errorCode:j.error_code,refunded:j.refunded,createdAt:j.created_at,archived:j.archived});

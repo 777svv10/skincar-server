@@ -89,3 +89,6 @@ CREATE TABLE IF NOT EXISTS photo_consents (
  accepted_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS photo_consents_owner ON photo_consents(telegram_id,vehicle_id);
+
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS original_image BYTEA;
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS original_mime TEXT;
