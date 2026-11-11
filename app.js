@@ -1,3 +1,4 @@
+import {catalog,createInvoice,checkCheckout,settlePayment,applyRefund} from './payments.js';
 import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import {enqueue,imageOf,optionsOf,viewJob,uuid,grantPilot} from './generations.js';
 import {validateInitData} from './auth.js';
@@ -23,7 +24,12 @@ return async(req,res)=>{
       const supplied=Buffer.from(String(req.headers['x-telegram-bot-api-secret-token']||'')), wanted=Buffer.from(WEBHOOK_SECRET);
       if(supplied.length!==wanted.length||!timingSafeEqual(supplied,wanted))return reply(res,403,{error:'Forbidden'});
       const update=await body(req),m=update.message;
-      if(m?.chat?.type==='private'&&/^\/start(?:@skincartuning_bot)?(?:\s|$)/i.test(m.text||''))await telegram('sendMessage',{chat_id:m.chat.id,text:'Добро пожаловать в SkinCar — твоё ИИ тюнинг-ателье. Открой приложение, чтобы собрать образ автомобиля.',reply_markup:{inline_keyboard:[[{text:'Открыть SkinCar',web_app:{url:APP_URL}}]]}});
+      if(update.pre_checkout_query){const q=update.pre_checkout_query;const ok=await checkCheckout(db,q,config);await telegram('answerPreCheckoutQuery',{pre_checkout_query_id:q.id,ok,...(!ok?{error_message:'Счёт недоступен. Открой SkinCar и создай новый.'}:{})});}
+      if(m?.successful_payment)await settlePayment(db,m.from.id,m.successful_payment);
+      if(m?.refunded_payment){const recipient=m.chat?.type==='private'?m.chat.id:m.from?.id;await settlePayment(db,recipient,m.refunded_payment);await applyRefund(db,recipient,m.refunded_payment);}
+      if(m?.chat?.type==='private'&&/^\/(paysupport|support)(?:@skincartuning_bot)?(?:\s|$)/i.test(m.text||''))await telegram('sendMessage',{chat_id:m.chat.id,text:'Поддержка платежей SkinCar: @vladisimonn. Отправь номер заказа из истории покупок и опиши проблему. Не отправляй пароли или данные карты.'});
+
+      if(m?.chat?.type==='private'&&/^\/start(?:@skincartuning_bot)?(?:\s|$)/i.test(m.text||''))await telegram('sendMessage',{chat_id:m.chat.id,text:'Добро пожаловать в SkinCar — твоё тюнинг-ателье. Открой приложение, чтобы собрать образ автомобиля.',reply_markup:{inline_keyboard:[[{text:'Открыть SkinCar',web_app:{url:APP_URL}}]]}});
       return reply(res,200,{ok:true});
     }
     if(path==='/api/auth/telegram'&&req.method==='POST'){
@@ -41,10 +47,28 @@ return async(req,res)=>{
     if(!bearer)return reply(res,401,{error:'Login required'});
     const {rows}=await db.query(`SELECT u.* FROM sessions s JOIN users u USING(telegram_id) WHERE s.token_hash=$1 AND s.expires_at>now()`,[digest(bearer[1])]);
     const user=rows[0];if(!user)return reply(res,401,{error:'Session expired'});
+    if(path==='/api/payments/catalog'&&req.method==='GET')return reply(res,200,catalog(user.telegram_id,config));
+    if(path==='/api/payments/invoice'&&req.method==='POST'){const b=await body(req);return reply(res,200,await createInvoice(db,user.telegram_id,b.packId,telegram,config));}
+    if(path==='/api/payments/history'&&req.method==='GET'){const r=await db.query('SELECT r.order_id,r.stars,r.credits,r.created_at,r.refunded_at FROM payment_receipts r WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 50',[user.telegram_id]);return reply(res,200,{purchases:r.rows,balance:user.balance});}
+    if(path==='/api/vehicles'&&req.method==='GET'){return reply(res,200,{vehicles:(await db.query('SELECT id,name,created_at FROM vehicles WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 20',[user.telegram_id])).rows});}
+    if(path==='/api/vehicles'&&req.method==='POST'){
+      const b=await body(req,4*1024*1024+8192);const name=typeof b.name==='string'?b.name.trim().replace(/\s+/g,' '):'';
+      if(!uuid(b.id)||name.length<2||name.length>80||/[\x00-\x1f<>]/.test(name))return reply(res,400,{code:'INVALID_VEHICLE'});
+      const source=await imageOf(b.image);
+      const c=await db.connect();try{await c.query('BEGIN');await c.query('SELECT telegram_id FROM users WHERE telegram_id=$1 FOR UPDATE',[user.telegram_id]);
+       const existing=(await c.query('SELECT id,name FROM vehicles WHERE id=$1 AND telegram_id=$2',[b.id,user.telegram_id])).rows[0];
+       if(existing){await c.query('COMMIT');return reply(res,200,{vehicle:existing});}
+       const count=(await c.query('SELECT count(*) AS n FROM vehicles WHERE telegram_id=$1',[user.telegram_id])).rows[0];if(Number(count.n)>=20)throw Object.assign(Error(),{status:429,code:'VEHICLE_LIMIT'});
+       const vehicle=(await c.query('INSERT INTO vehicles(id,telegram_id,name,source_image) VALUES($1,$2,$3,$4) RETURNING id,name',[b.id,user.telegram_id,name,source])).rows[0];await c.query('COMMIT');return reply(res,201,{vehicle});
+      }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+    }
+    const vehiclePath=/^\/api\/vehicles\/([a-f0-9-]+)\/source$/.exec(path);
+    if(vehiclePath&&req.method==='GET'){if(!uuid(vehiclePath[1]))return reply(res,404,{});const v=(await db.query('SELECT source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[vehiclePath[1],user.telegram_id])).rows[0];if(!v)return reply(res,404,{});res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, no-store'});return res.end(v.source_image);}
     if(path==='/api/generations'&&req.method==='POST'){
       if(!process.env.OPENAI_API_KEY)return reply(res,503,{code:'GENERATION_DISABLED'});
       const b=await body(req,4*1024*1024+8192);
       const options=optionsOf(b.options),source=await imageOf(b.image);
+      if(options.vehicleId){const v=(await db.query('SELECT name FROM vehicles WHERE id=$1 AND telegram_id=$2',[options.vehicleId,user.telegram_id])).rows[0];if(!v)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});options.vehicleName=v.name;}
       return reply(res,202,await enqueue(db,user.telegram_id,b.requestKey,source,options));
     }
     if(path==='/api/generations'&&req.method==='GET'){
