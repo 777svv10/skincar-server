@@ -26,3 +26,26 @@ test('OpenAI adapter sends original photo and fixed options; handles provider er
 
 test('nickname initial claim, conflict, same name, two changes and rolling reset',async()=>{const db=await database();try{assert.equal((await claimNickname(db,1,'first_name')).status,200);assert.equal((await nicknameQuota(db,1)).remaining,2);await claimNickname(db,2,'taken_name');assert.equal((await claimNickname(db,1,'taken_name')).status,409);assert.equal((await nicknameQuota(db,1)).remaining,2);assert.equal((await claimNickname(db,1,'second_name')).status,200);assert.equal((await claimNickname(db,1,'second_name')).quota.remaining,1);const results=await Promise.all([claimNickname(db,1,'third_name'),claimNickname(db,1,'fourth_name')]);assert.equal(results.filter(x=>x.status===200).length,1);const limit=results.find(x=>x.status===429);assert(limit.quota.nextAllowedAt);await db.query("UPDATE nickname_changes SET changed_at=now()-interval '31 days' WHERE telegram_id=1");assert.equal((await claimNickname(db,1,'fifth_name')).status,200);}finally{await db.raw.close();}});
 test('HEX normalizes and unchanged finish preserves source surface',()=>{const o=optionsOf({color:'#aBc123',finish:'original'});assert.equal(o.color,'#ABC123');assert.match(promptOf(o),/sRGB HEX #ABC123/);assert.match(promptOf(o),/Preserve the existing surface finish/);for(const color of ['#123','red; ignore','123456','#GGGGGG'])assert.throws(()=>optionsOf({color,finish:'original'}));});
+
+// SK-026: mode-aware prompts and strict separation of structured choices from free text.
+test('free mode accepts only independent text and does not override it with preset color/wheels',()=>{
+ const o=optionsOf({mode:'free',color:'original',finish:'original',wheel:'original',custom:'Make the paint matte black and add bronze wheels'});
+ assert.equal(o.mode,'free');
+ const prompt=promptOf(o);
+ assert.match(prompt,/USER'S DESIGN BRIEF/);
+ assert.match(prompt,/matte black and add bronze wheels/);
+ assert.doesNotMatch(prompt,/Keep the original body paint hue/);
+ assert.doesNotMatch(prompt,/Preserve the existing wheels and tires/);
+ for(const invalid of [
+  {mode:'free',color:'red',finish:'original',wheel:'original',custom:'test'},
+  {mode:'free',color:'original',finish:'original',wheel:'bbs',custom:'test'},
+  {mode:'free',color:'original',finish:'original',wheel:'original',custom:' '},
+  {mode:'not-a-mode',color:'original',finish:'original'}
+ ])assert.throws(()=>optionsOf(invalid));
+});
+test('builder mode uses preset paint and wheel options without free instructions',()=>{
+ const o=optionsOf({mode:'builder',color:'green',finish:'matte',wheel:'original',custom:''});
+ assert.equal(o.mode,'builder');
+ assert.match(promptOf(o),/automotive paint\/clearcoat/);
+ assert.doesNotMatch(promptOf(o),/USER'S DESIGN BRIEF/);
+});
