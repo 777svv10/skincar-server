@@ -92,3 +92,14 @@ CREATE INDEX IF NOT EXISTS photo_consents_owner ON photo_consents(telegram_id,ve
 
 ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS original_image BYTEA;
 ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS original_mime TEXT;
+
+-- SK-060: user-owned unfinished editor drafts, automatically expired after 7 days.
+CREATE TABLE IF NOT EXISTS drafts (
+ id UUID PRIMARY KEY,
+ telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+ vehicle_id UUID NOT NULL REFERENCES vehicles(id),
+ options JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS drafts_owner_updated ON drafts(telegram_id,updated_at DESC);
+CREATE INDEX IF NOT EXISTS drafts_expiration ON drafts(updated_at);

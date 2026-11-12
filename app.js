@@ -1,9 +1,11 @@
 import {requireConsent,recordConsent,verifyConsent,imageHashes,CONSENT_VERSION} from './consent.js';
 import {catalog,createInvoice,checkCheckout,settlePayment,applyRefund} from './payments.js';
 import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
+import sharp from 'sharp';
 import {enqueue,imageOf,optionsOf,viewJob,uuid,grantPilot} from './generations.js';
 import {validateInitData} from './auth.js';
 import {normalizeNickname,claimNickname,nicknameQuota} from './nickname.js';
+import {listDrafts,saveDraft,deleteDraft} from './drafts.js';
 export function createHandler(db,config=process.env){
 const {BOT_TOKEN,WEBHOOK_SECRET}=config;
 const APP_URL=config.APP_URL||'https://skincar01.netlify.app/';
@@ -18,7 +20,7 @@ return async(req,res)=>{
   if(req.headers.origin&&req.headers.origin!==ORIGIN)return reply(res,403,{error:'Origin denied'});
   if(req.headers.origin===ORIGIN){res.setHeader('Access-Control-Allow-Origin',ORIGIN);res.setHeader('Vary','Origin')}
   res.setHeader('X-Content-Type-Options','nosniff');
-  if(req.method==='OPTIONS'){res.setHeader('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS');res.setHeader('Access-Control-Allow-Headers','Content-Type,Authorization');res.writeHead(204);return res.end()}
+  if(req.method==='OPTIONS'){res.setHeader('Access-Control-Allow-Methods','GET,POST,PUT,PATCH,DELETE,OPTIONS');res.setHeader('Access-Control-Allow-Headers','Content-Type,Authorization');res.writeHead(204);return res.end()}
   try{
     if(path==='/health'&&req.method==='GET'){await db.query('SELECT 1');return reply(res,200,{ok:true})}
     if(path==='/telegram/webhook'&&req.method==='POST'){
@@ -77,8 +79,24 @@ return async(req,res)=>{
       if(!consent)return reply(res,409,{code:'PHOTO_CONSENT_REQUIRED'});
       return reply(res,200,{vehicle:{id:vehicle.id,name:vehicle.name},consentId:consent.id});
     }
+    // Small private thumbnails for drafts: avoid downloading every full-size original in Garage.
+    const vehicleThumbPath=/^\/api\/vehicles\/([a-f0-9-]+)\/thumbnail$/.exec(path);
+    if(vehicleThumbPath&&req.method==='GET'){
+      if(!uuid(vehicleThumbPath[1]))return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+      const item=(await db.query('SELECT source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[vehicleThumbPath[1],user.telegram_id])).rows[0];
+      if(!item)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+      const thumbnail=await sharp(item.source_image).resize(480,320,{fit:'inside',withoutEnlargement:true}).jpeg({quality:75}).toBuffer();
+      res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, no-store','Content-Length':thumbnail.length});return res.end(thumbnail);
+    }
     const vehiclePath=/^\/api\/vehicles\/([a-f0-9-]+)\/source$/.exec(path);
     if(vehiclePath&&req.method==='GET'){if(!uuid(vehiclePath[1]))return reply(res,404,{});const v=(await db.query("SELECT COALESCE(original_image,source_image) AS source_image,COALESCE(original_mime,'image/jpeg') AS mime FROM vehicles WHERE id=$1 AND telegram_id=$2",[vehiclePath[1],user.telegram_id])).rows[0];if(!v)return reply(res,404,{});res.writeHead(200,{'Content-Type':v.mime,'Cache-Control':'private, no-store'});return res.end(v.source_image);}
+    // Editor drafts: authorized per account; the server is the source of truth for 7-day retention.
+    if(path==='/api/drafts'&&req.method==='GET')return reply(res,200,{drafts:await listDrafts(db,user.telegram_id)});
+    const draftPath=/^\/api\/drafts\/([a-f0-9-]+)$/.exec(path);
+    if(draftPath){
+      if(req.method==='PUT'){const b=await body(req,8192);return reply(res,200,{draft:await saveDraft(db,user.telegram_id,draftPath[1],b.vehicleId,b.options)});}
+      if(req.method==='DELETE')return reply(res,200,{deleted:await deleteDraft(db,user.telegram_id,draftPath[1])});
+    }
     if(path==='/api/generations'&&req.method==='POST'){
       if(!process.env.OPENAI_API_KEY)return reply(res,503,{code:'GENERATION_DISABLED'});
       const b=await body(req,15*1024*1024+8192);
@@ -87,13 +105,13 @@ return async(req,res)=>{
       return reply(res,202,await enqueue(db,user.telegram_id,b.requestKey,source,options));
     }
     if(path==='/api/generations'&&req.method==='GET'){
-      const jobs=await db.query('SELECT id,status,options,error_code,refunded,created_at,archived FROM generations WHERE telegram_id=$1 AND NOT archived ORDER BY created_at DESC LIMIT 20',[user.telegram_id]);
+      const jobs=await db.query('SELECT id,request_key,status,options,error_code,refunded,created_at,archived FROM generations WHERE telegram_id=$1 AND NOT archived ORDER BY created_at DESC LIMIT 20',[user.telegram_id]);
       return reply(res,200,{jobs:jobs.rows.map(viewJob),balance:user.balance});
     }
     const jobPath=/^\/api\/generations\/([^/]+)(?:\/(source|result|thumbnail))?$/.exec(path);
     if(jobPath){
       if(!uuid(jobPath[1]))return reply(res,404,{error:'Not found'});
-      const job=(await db.query('SELECT id,status,options,error_code,refunded,created_at,archived FROM generations WHERE id=$1 AND telegram_id=$2 AND NOT archived',[jobPath[1],user.telegram_id])).rows[0];
+      const job=(await db.query('SELECT id,request_key,status,options,error_code,refunded,created_at,archived FROM generations WHERE id=$1 AND telegram_id=$2 AND NOT archived',[jobPath[1],user.telegram_id])).rows[0];
       if(!job)return reply(res,404,{error:'Not found'});
       if(req.method==='DELETE'&&!jobPath[2]){
         const deleted=await db.query("UPDATE generations SET archived=true,source_image=NULL,result_image=NULL,thumbnail=NULL WHERE id=$1 AND telegram_id=$2 AND status IN ('done','failed') RETURNING id",[job.id,user.telegram_id]);

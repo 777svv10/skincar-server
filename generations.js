@@ -8,15 +8,16 @@ export const MODEL=process.env.IMAGE_EDIT_MODEL||'gpt-image-2.5-sunburst';
 export const uuid=s=>typeof s==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(s);
 export function problem(status,code){return Object.assign(Error(code),{status,code});}
 export function optionsOf(o){
- const allowed=['color','finish','wheel','custom','vehicleId','mode'];
+ const allowed=['color','finish','wheel','custom','vehicleId','mode','draftId'];
  if(!o||!(Object.hasOwn(COLORS,o.color)||/^#[0-9a-f]{6}$/i.test(o.color))||!Object.hasOwn(FINISHES,o.finish)||Object.keys(o).some(k=>!allowed.includes(k)))throw problem(400,'INVALID_OPTIONS');
  if(o.vehicleId!==undefined&&!uuid(o.vehicleId))throw problem(400,'INVALID_OPTIONS');
+ if(o.draftId!==undefined&&!uuid(o.draftId))throw problem(400,'INVALID_OPTIONS');
  if(o.mode!==undefined&&!['builder','free'].includes(o.mode))throw problem(400,'INVALID_OPTIONS');
  const wheel=o.wheel??'original',custom=o.custom??'';
  if((wheel!=='original'&&!Object.hasOwn(WHEELS,wheel))||typeof custom!=='string'||custom.length>1000)throw problem(400,'INVALID_OPTIONS');
  // Free editing cannot mix preset choices with the user's own instructions.
  if(o.mode==='free'&&(!custom.trim()||o.color!=='original'||o.finish!=='original'||wheel!=='original'))throw problem(400,'INVALID_OPTIONS');
- return {...(o.vehicleId?{vehicleId:o.vehicleId}:{}),...(o.mode?{mode:o.mode}:{}),color:o.color.startsWith('#')?o.color.toUpperCase():o.color,finish:o.finish,...(wheel!=='original'?{wheel}:{}),...(custom.trim()?{custom:custom.trim()}:{})};
+ return {...(o.vehicleId?{vehicleId:o.vehicleId}:{}),...(o.draftId?{draftId:o.draftId}:{}),...(o.mode?{mode:o.mode}:{}),color:o.color.startsWith('#')?o.color.toUpperCase():o.color,finish:o.finish,...(wheel!=='original'?{wheel}:{}),...(custom.trim()?{custom:custom.trim()}:{})};
 }
 export function promptOf(o){
  // Only explicitly selected edits from free text have authority to change the car.
@@ -41,7 +42,7 @@ export async function imageOf(data){
  if(Buffer.from(m[2],'base64').length>10*1024*1024)throw problem(413,'IMAGE_TOO_LARGE');
  try{const image=sharp(Buffer.from(m[2],'base64'),{limitInputPixels:40000000,failOn:'error'});const meta=await image.metadata();if(!['jpeg','png','webp'].includes(meta.format)||meta.pages>1||meta.width<256||meta.height<256)throw Error();const output=await image.rotate().resize(1600,1600,{fit:'inside',withoutEnlargement:true}).flatten({background:'#fff'}).jpeg({quality:88}).toBuffer();if(output.length>3*1024*1024)throw Error();return output;}catch{throw problem(400,'INVALID_IMAGE');}
 }
-export const viewJob=j=>({id:j.id,status:j.status,options:j.options,errorCode:j.error_code,refunded:j.refunded,createdAt:j.created_at,archived:j.archived});
+export const viewJob=j=>({id:j.id,requestKey:j.request_key,status:j.status,options:j.options,errorCode:j.error_code,refunded:j.refunded,createdAt:j.created_at,archived:j.archived});
 export async function transaction(db,fn){const c=await db.connect();try{await c.query('BEGIN');const result=await fn(c);await c.query('COMMIT');return result;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}}
 export async function enqueue(db,userId,key,source,options){
  if(!uuid(key))throw problem(400,'INVALID_REQUEST_KEY');
@@ -103,6 +104,6 @@ export async function workOnce(db,edit=editWithOpenAI){
  const token=randomUUID();
  const job=await transaction(db,async c=>(await c.query(`UPDATE generations SET status='processing',started_at=now(),worker_token=$1 WHERE id=(SELECT id FROM generations WHERE status='queued' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`,[token])).rows[0]);
  if(!job)return;
- try{const out=await edit(job);await db.query("UPDATE generations SET status='done',result_image=$3,thumbnail=$4,usage=$5,finished_at=now() WHERE id=$1 AND worker_token=$2 AND status='processing'",[job.id,token,out.result,out.thumbnail,JSON.stringify(out.usage)]);console.log('Generation completed:',job.id);}catch(e){console.error('Generation failed:',job.id,e.code||e.name);await failJob(db,job.id,e.status?e.code:'GENERATION_FAILED',token);}
+ try{const out=await edit(job);const completed=await db.query("UPDATE generations SET status='done',result_image=$3,thumbnail=$4,usage=$5,finished_at=now() WHERE id=$1 AND worker_token=$2 AND status='processing' RETURNING id",[job.id,token,out.result,out.thumbnail,JSON.stringify(out.usage)]);if(completed.rowCount&&job.options?.draftId){try{await db.query('DELETE FROM drafts WHERE id=$1 AND telegram_id=$2',[job.options.draftId,job.telegram_id]);}catch(e){console.error('Completed generation draft cleanup failed:',e.code||e.name);}}console.log('Generation completed:',job.id);}catch(e){console.error('Generation failed:',job.id,e.code||e.name);await failJob(db,job.id,e.status?e.code:'GENERATION_FAILED',token);}
 }
 export function startWorker(db){let running=false;const tick=async()=>{if(running)return;running=true;try{await workOnce(db);}catch(e){console.error('Worker failure:',e.code||e.name);}finally{running=false;}};const timer=setInterval(tick,3000);timer.unref();tick();return ()=>clearInterval(timer);}

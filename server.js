@@ -4,6 +4,7 @@ import {readFile} from 'node:fs/promises';
 import pg from 'pg';
 import {createHandler} from './app.js';
 import {startWorker} from './generations.js';
+import {cleanupExpiredDrafts} from './drafts.js';
 const {BOT_TOKEN,DATABASE_URL,WEBHOOK_SECRET}=process.env;
 if(!BOT_TOKEN||!DATABASE_URL||!WEBHOOK_SECRET||WEBHOOK_SECRET.length<32)throw Error('Set BOT_TOKEN, DATABASE_URL and WEBHOOK_SECRET (32+ characters)');
 const db=new pg.Pool({connectionString:DATABASE_URL,max:10});
@@ -15,3 +16,7 @@ const paymentRetry=setInterval(()=>{if(appConfig.PAYMENTS_MODE==='off')void enab
 http.createServer(createHandler(db,appConfig)).listen(Number(process.env.PORT)||3000,'0.0.0.0',()=>console.log('SkinCar server ready'));
 setInterval(()=>db.query('DELETE FROM sessions WHERE expires_at < now()').catch(()=>{}),3600000).unref();
 startWorker(db);
+// Expiration uses database timestamps, never client time. Retention: 7 days since last saved change.
+const draftCleanup=()=>cleanupExpiredDrafts(db).catch(e=>console.error('Draft cleanup failed',e.code||e.name));
+void draftCleanup();
+setInterval(draftCleanup,3600000).unref();
