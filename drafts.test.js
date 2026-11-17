@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {cleanDraftOptions,saveDraft,listDrafts,deleteDraft,cleanupExpiredDrafts,DRAFT_RETENTION_DAYS} from './drafts.js';
-const valid={mode:'builder',coatingType:'paint',color:'#02FC00',finish:'satin',wheel:'bbs',custom:'',fromRepeat:true};
+const valid={mode:'builder',coatingType:'paint',color:'#02FC00',finish:'satin',wheel:'original',wheelSku:'bmw-oem/bmw-style-1',custom:'',fromRepeat:true};
 test('draft fields sanitized and separate builder/free modes are supported',()=>{
- const b=cleanDraftOptions(valid);assert.equal(b.color,'#02FC00');assert.equal(b.wheel,'bbs');assert.equal(b.fromRepeat,true);
+ const b=cleanDraftOptions(valid);assert.equal(b.color,'#02FC00');assert.equal(b.wheelSku,'bmw-oem/bmw-style-1');assert.equal(b.fromRepeat,true);
  assert.equal(cleanDraftOptions({mode:'free',custom:'Добавь диски'}).custom,'Добавь диски');
  for(const value of [{mode:'builder',wheel:'not-a-wheel'},{mode:'wrong'},{mode:'free',custom:'x'.repeat(1001)}]){
   assert.throws(()=>cleanDraftOptions(value),e=>e.code==='INVALID_DRAFT');
@@ -64,7 +64,7 @@ test('deleting a draft preserves sources of completed generations',async()=>{
 });
 test('generation request stays backward-compatible while accepting a draft ID',async()=>{
  const {optionsOf}=await import('./generations.js');
- const base={mode:'builder',color:'#02FC00',finish:'satin',wheel:'bbs',custom:''};
+ const base={mode:'builder',color:'#02FC00',finish:'satin',wheel:'original',wheelSku:'bmw-oem/bmw-style-1',custom:''};
  assert.equal(optionsOf(base).draftId,undefined);
  assert.equal(optionsOf({...base,draftId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'}).draftId,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
  assert.throws(()=>optionsOf({...base,draftId:'not-a-uuid'}),e=>e.code==='INVALID_OPTIONS');

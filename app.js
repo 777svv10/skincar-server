@@ -2,7 +2,8 @@ import {requireConsent,recordConsent,verifyConsent,imageHashes,CONSENT_VERSION} 
 import {catalog,createInvoice,checkCheckout,settlePayment,applyRefund} from './payments.js';
 import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import sharp from 'sharp';
-import {enqueue,imageOf,optionsOf,viewJob,uuid,grantPilot} from './generations.js';
+import {enqueue,imageOf,optionsOf,admitWheelOptions,viewJob,uuid,grantPilot} from './generations.js';
+import {wheelAccess} from './wheel-library.js';
 import {validateInitData} from './auth.js';
 import {normalizeNickname,claimNickname,nicknameQuota} from './nickname.js';
 import {listDrafts,saveDraft,deleteDraft} from './drafts.js';
@@ -50,6 +51,7 @@ return async(req,res)=>{
     if(!bearer)return reply(res,401,{error:'Login required'});
     const {rows}=await db.query(`SELECT u.* FROM sessions s JOIN users u USING(telegram_id) WHERE s.token_hash=$1 AND s.expires_at>now()`,[digest(bearer[1])]);
     const user=rows[0];if(!user)return reply(res,401,{error:'Session expired'});
+    if(path==='/api/wheels/availability'&&req.method==='GET')return reply(res,200,wheelAccess(config,user.telegram_id));
     if(path==='/api/payments/catalog'&&req.method==='GET')return reply(res,200,catalog(user.telegram_id,config));
     if(path==='/api/payments/invoice'&&req.method==='POST'){const b=await body(req);return reply(res,200,await createInvoice(db,user.telegram_id,b.packId,telegram,config));}
     if(path==='/api/payments/history'&&req.method==='GET'){const r=await db.query('SELECT r.order_id,r.stars,r.credits,r.created_at,r.refunded_at FROM payment_receipts r WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 50',[user.telegram_id]);return reply(res,200,{purchases:r.rows,balance:user.balance});}
@@ -100,7 +102,7 @@ return async(req,res)=>{
     if(path==='/api/generations'&&req.method==='POST'){
       if(!process.env.OPENAI_API_KEY)return reply(res,503,{code:'GENERATION_DISABLED'});
       const b=await body(req,15*1024*1024+8192);
-      if(!uuid(b.consentId)||!uuid(b.options?.vehicleId))return reply(res,400,{code:'PHOTO_CONSENT_REQUIRED'});const options=optionsOf(b.options),source=await imageOf(b.image);await verifyConsent(db,user.telegram_id,b.consentId,options.vehicleId,b.image,source);options.photoConsentId=b.consentId;
+      if(!uuid(b.consentId)||!uuid(b.options?.vehicleId))return reply(res,400,{code:'PHOTO_CONSENT_REQUIRED'});const options=admitWheelOptions(optionsOf(b.options),config,user.telegram_id),source=await imageOf(b.image);await verifyConsent(db,user.telegram_id,b.consentId,options.vehicleId,b.image,source);options.photoConsentId=b.consentId;
       if(options.vehicleId){const v=(await db.query('SELECT name FROM vehicles WHERE id=$1 AND telegram_id=$2',[options.vehicleId,user.telegram_id])).rows[0];if(!v)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});options.vehicleName=v.name;}
       return reply(res,202,await enqueue(db,user.telegram_id,b.requestKey,source,options));
     }

@@ -1,0 +1,17 @@
+SkinCar SK-065 — ЗАГРУЗКА В MAIN через iPhone (17.11.2026)
+
+В этом ZIP 26 файлов и один архив wheel-references.tar.gz, в котором находятся 107 референсов + manifest.json.
+Для GitHub нужно загрузить РАСПАКОВАННОЕ содержимое ЭТОГО ZIP, а не ZIP-файл.
+
+GitHub: https://github.com/777svv10/skincar-server/tree/main
+Code → убедитесь, что main → Add file → Upload files → выбрать ВСЕ файлы из распакованной папки → Commit changes.
+Все файлы находятся в корне; отдельную папку wheel-references загружать не нужно.
+Файл wheel-references.tar.gz должен лежать в корне вместе с package.json и prepare-wheel-references.cjs.
+После коммита Railway автоматически собирает main. Подготовка референсов выполняется перед npm start.
+
+В Railway уже заданы WHEEL_GENERATION_MODE=live и WHEEL_APPROVED_SKUS (все 107), без запуска старого кода.
+ВНИМАНИЕ: GitHub репозиторий публичный; архив фотографий будет виден посетителям репозитория.
+ВНИМАНИЕ: изображения пока не лицензированы для публичного использования, это предпринимательский риск.
+
+Проверка после деплоя: Railway > positive-optimism > skincar-server > Deployments = SUCCESS; в Logs: SkinCar server ready и SK065 wheel references ready.
+До успешного деплоя Railway НЕ обновляйте Netlify; только затем новая фронтенд-сборка SK-065.

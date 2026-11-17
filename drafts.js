@@ -1,5 +1,6 @@
 import {randomUUID} from 'node:crypto';
-import {COLORS, FINISHES, WHEELS, uuid, problem} from './generations.js';
+import {COLORS, FINISHES, uuid, problem} from './generations.js';
+import {isWheelSku} from './wheel-library.js';
 
 export const DRAFT_RETENTION_DAYS=7;
 export const DRAFT_MAX_PER_USER=20;
@@ -9,8 +10,9 @@ export function cleanDraftOptions(value){
  const mode=value.mode==='free'?'free':value.mode==='builder'?'builder':null;
  if(!mode||!['paint','film'].includes(value.coatingType??'paint'))throw problem(400,'INVALID_DRAFT');
  const color=value.color??'original',finish=value.finish??'original',wheel=value.wheel??'original',custom=value.custom??'';
- if(!(Object.hasOwn(COLORS,color)||typeof color==='string'&&/^#[a-f0-9]{6}$/i.test(color))||!Object.hasOwn(FINISHES,finish)||!(wheel==='original'||Object.hasOwn(WHEELS,wheel))||typeof custom!=='string'||custom.length>1000)throw problem(400,'INVALID_DRAFT');
- return {mode,coatingType:value.coatingType??'paint',color,finish,wheel,custom,fromRepeat:!!value.fromRepeat};
+ if(!(Object.hasOwn(COLORS,color)||typeof color==='string'&&/^#[a-f0-9]{6}$/i.test(color))||!Object.hasOwn(FINISHES,finish)||wheel!=='original'||typeof custom!=='string'||custom.length>1000)throw problem(400,'INVALID_DRAFT');
+ if(value.wheelSku!==undefined&&(mode!=='builder'||!isWheelSku(value.wheelSku)))throw problem(400,'INVALID_DRAFT');
+ return {mode,coatingType:value.coatingType??'paint',color,finish,wheel,...(value.wheelSku?{wheelSku:value.wheelSku}:{}),custom,fromRepeat:!!value.fromRepeat};
 }
 
 export async function listDrafts(db,userId){
