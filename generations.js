@@ -52,6 +52,15 @@ export async function imageOf(data){
 }
 export const viewJob=j=>({id:j.id,requestKey:j.request_key,status:j.status,options:j.options,errorCode:j.error_code,refunded:j.refunded,createdAt:j.created_at,archived:j.archived});
 export async function transaction(db,fn){const c=await db.connect();try{await c.query('BEGIN');const result=await fn(c);await c.query('COMMIT');return result;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}}
+// Account-specific pilot exemption. A strict allowlist is configured on the server,
+// never sent by the Mini App. Other safety limits and credit accounting still apply.
+export function isDailyLimitExempt(userId, allowList=process.env.SKINCAR_DAILY_LIMIT_EXEMPT_TELEGRAM_IDS||''){
+ const target=String(userId);
+ return typeof allowList==='string'&&allowList.split(',').some(raw=>{
+  const id=raw.trim();
+  return /^[1-9]\d*$/.test(id)&&id===target;
+ });
+}
 export async function enqueue(db,userId,key,source,options){
  if(!uuid(key))throw problem(400,'INVALID_REQUEST_KEY');
  const hash=createHash('sha256').update(source).update(JSON.stringify(options)).digest('hex');
@@ -71,7 +80,7 @@ export async function enqueue(db,userId,key,source,options){
    count(*) FILTER(WHERE NOT archived) AS total FROM generations`,[userId])).rows[0];
   if(Number(counts.active)>0)throw problem(409,'JOB_ACTIVE');
   if(Number(counts.stored)>=100)throw problem(429,'GARAGE_FULL');
-  if(Number(counts.daily)>=10)throw problem(429,'DAILY_LIMIT');
+  if(Number(counts.daily)>=10&&!isDailyLimitExempt(userId))throw problem(429,'DAILY_LIMIT');
   if(Number(counts.pending)>=20||Number(counts.total)>=200)throw problem(503,'CAPACITY_LIMIT');
   const id=randomUUID();
   const job=(await c.query(`INSERT INTO generations(id,telegram_id,request_key,request_hash,status,options,source_image,model) VALUES($1,$2,$3,$4,'queued',$5,$6,$7) RETURNING *`,[id,userId,key,hash,JSON.stringify(options),source,MODEL])).rows[0];
