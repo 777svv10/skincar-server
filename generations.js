@@ -9,17 +9,18 @@ export const MODEL=process.env.IMAGE_EDIT_MODEL||'gpt-image-2.5-sunburst';
 export const uuid=s=>typeof s==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(s);
 export function problem(status,code){return Object.assign(Error(code),{status,code});}
 export function optionsOf(o){
- const allowed=['color','finish','wheel','wheelSku','custom','vehicleId','photoId','mode','draftId'];
+ const allowed=['color','finish','wheel','wheelSku','custom','vehicleId','photoId','mode','draftId','qualityMode'];
  if(!o||!(Object.hasOwn(COLORS,o.color)||/^#[0-9a-f]{6}$/i.test(o.color))||!Object.hasOwn(FINISHES,o.finish)||Object.keys(o).some(k=>!allowed.includes(k)))throw problem(400,'INVALID_OPTIONS');
  if(o.vehicleId!==undefined&&!uuid(o.vehicleId))throw problem(400,'INVALID_OPTIONS');
  if(o.draftId!==undefined&&!uuid(o.draftId))throw problem(400,'INVALID_OPTIONS');
   if(o.photoId!==undefined&&(!uuid(o.photoId)||!o.vehicleId))throw problem(400,'INVALID_OPTIONS');
  if(o.mode!==undefined&&!['builder','free'].includes(o.mode))throw problem(400,'INVALID_OPTIONS');
+ if(o.qualityMode!==undefined&&!['standard','hd'].includes(o.qualityMode))throw problem(400,'INVALID_OPTIONS');
  const wheel=o.wheel??'original',custom=o.custom??'';
  if(wheel!=='original'||(o.wheelSku!==undefined&&!isWheelSku(o.wheelSku))||typeof custom!=='string'||custom.length>1000)throw problem(400,'INVALID_OPTIONS');
  // Free editing cannot mix preset choices with the user's own instructions.
  if(o.mode==='free'&&(!custom.trim()||o.color!=='original'||o.finish!=='original'||wheel!=='original'||o.wheelSku))throw problem(400,'INVALID_OPTIONS');
- return {...(o.vehicleId?{vehicleId:o.vehicleId}:{}),...(o.draftId?{draftId:o.draftId}:{}),...(o.photoId?{photoId:o.photoId}:{}),...(o.mode?{mode:o.mode}:{}),color:o.color.startsWith('#')?o.color.toUpperCase():o.color,finish:o.finish,...(o.wheelSku?{wheelSku:o.wheelSku}:{}),...(custom.trim()?{custom:custom.trim()}:{})};
+ return {...(o.vehicleId?{vehicleId:o.vehicleId}:{}),...(o.draftId?{draftId:o.draftId}:{}),...(o.photoId?{photoId:o.photoId}:{}),...(o.mode?{mode:o.mode}:{}),...(o.qualityMode?{qualityMode:o.qualityMode}:{}),color:o.color.startsWith('#')?o.color.toUpperCase():o.color,finish:o.finish,...(o.wheelSku?{wheelSku:o.wheelSku}:{}),...(custom.trim()?{custom:custom.trim()}:{})};
 }
 export function admitWheelOptions(options,config=process.env,userId){
  if(!options.wheelSku)return options;
@@ -92,6 +93,21 @@ export async function grantPilot(db,userId){
  if(String(userId)!==process.env.TESTER_TELEGRAM_ID)return;
  await transaction(db,async c=>{const r=await c.query("INSERT INTO credit_ledger(operation_key,telegram_id,delta) VALUES($1,$2,5) ON CONFLICT DO NOTHING RETURNING operation_key",['pilot-v1:'+userId,userId]);if(r.rowCount)await c.query('UPDATE users SET balance=balance+5 WHERE telegram_id=$1',[userId]);});
 }
+// SK-072: output quality is a per-job choice, never a hidden mutation of saved projects.
+// Use established 2K aspect presets to minimize cropping of the original vehicle.
+export function imageEditSettings(options={},dimensions={width:1600,height:1200},model=''){
+ if(options.qualityMode!=='hd')return {quality:'medium',size:'auto'};
+ const width=Number(dimensions.width)||1600,height=Number(dimensions.height)||1200;
+ const ratio=width/height;
+ let size='2048x2048';
+ if(ratio>=1.55)size='2048x1152';
+ else if(ratio>=1.12)size='2048x1536';
+ else if(ratio<=1/1.55)size='1152x2048';
+ else if(ratio<=1/1.12)size='1536x2048';
+ // Other models may not accept these custom dimensions; keep a safe default.
+ if(!/^gpt-image-2(?:\.|-)/.test(model))size='auto';
+ return {quality:'high',size,output_compression:'92'};
+}
 export async function editWithOpenAI(job,fetcher=fetch){
  let reference=null;
  if(job.options.wheelSku){
@@ -102,14 +118,17 @@ export async function editWithOpenAI(job,fetcher=fetch){
  await moderateCustom(job.options.custom,fetcher);
  const form=new FormData();form.set('model',job.model);
  const imageField=reference?'image[]':'image';form.append(imageField,new Blob([job.source_image],{type:'image/jpeg'}),'car.jpg');
- if(reference)form.append(imageField,new Blob([reference.bytes],{type:reference.mime}),'wheel-reference.jpg');form.set('prompt',promptOf(job.options));form.set('size','auto');form.set('quality','medium');form.set('n','1');form.set('output_format','jpeg');
+ if(reference)form.append(imageField,new Blob([reference.bytes],{type:reference.mime}),'wheel-reference.jpg');
+ const dims=await sharp(job.source_image).metadata();
+ const settings=imageEditSettings(job.options,dims,job.model);
+ form.set('prompt',promptOf(job.options));form.set('size',settings.size);form.set('quality',settings.quality);if(settings.output_compression)form.set('output_compression',settings.output_compression);form.set('n','1');form.set('output_format','jpeg');
  const response=await fetcher('https://api.openai.com/v1/images/edits',{method:'POST',headers:{Authorization:'Bearer '+process.env.OPENAI_API_KEY},body:form,signal:AbortSignal.timeout(180000)});
  if(!response.ok){const code=response.status===401?'PROVIDER_AUTH':response.status===403?'PROVIDER_ACCESS':response.status===429?'PROVIDER_LIMIT':response.status===400?'PROVIDER_REJECTED':'PROVIDER_ERROR';throw problem(502,code);}
  // Limit response memory; no automatic paid retry on a timeout or ambiguous result.
  let bytes=0,parts=[];for await(const part of response.body){bytes+=part.length;if(bytes>25*1024*1024)throw problem(502,'PROVIDER_RESPONSE');parts.push(part);}
  const json=JSON.parse(Buffer.concat(parts).toString());const raw=json.data?.[0]?.b64_json;if(typeof raw!=='string')throw problem(502,'PROVIDER_RESPONSE');
  const result=Buffer.from(raw,'base64');const meta=await sharp(result,{limitInputPixels:40000000}).metadata();if(meta.format!=='jpeg')throw problem(502,'PROVIDER_RESPONSE');
- if(result.length>4*1024*1024)throw problem(502,'PROVIDER_RESPONSE');
+ if(result.length>(job.options.qualityMode==='hd'?12:4)*1024*1024)throw problem(502,'PROVIDER_RESPONSE');
  const thumbnail=await sharp(result).resize(480,320,{fit:'inside'}).jpeg({quality:75}).toBuffer();
  return {result,thumbnail,usage:json.usage||null};
 }
