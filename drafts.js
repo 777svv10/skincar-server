@@ -12,7 +12,8 @@ export function cleanDraftOptions(value){
  const color=value.color??'original',finish=value.finish??'original',wheel=value.wheel??'original',custom=value.custom??'';
  if(!(Object.hasOwn(COLORS,color)||typeof color==='string'&&/^#[a-f0-9]{6}$/i.test(color))||!Object.hasOwn(FINISHES,finish)||wheel!=='original'||typeof custom!=='string'||custom.length>1000)throw problem(400,'INVALID_DRAFT');
  if(value.wheelSku!==undefined&&(mode!=='builder'||!isWheelSku(value.wheelSku)))throw problem(400,'INVALID_DRAFT');
- return {mode,coatingType:value.coatingType??'paint',color,finish,wheel,...(value.wheelSku?{wheelSku:value.wheelSku}:{}),custom,fromRepeat:!!value.fromRepeat};
+ if(value.photoId!==undefined&&!uuid(value.photoId))throw problem(400,'INVALID_DRAFT');
+ return {mode,coatingType:value.coatingType??'paint',color,finish,wheel,...(value.photoId?{photoId:value.photoId}:{}),...(value.wheelSku?{wheelSku:value.wheelSku}:{}),custom,fromRepeat:!!value.fromRepeat};
 }
 
 export async function listDrafts(db,userId){
@@ -52,16 +53,9 @@ export async function saveDraft(db,userId,id,vehicleId,value){
  }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
 }
 
-async function deleteOrphanedSource(client,vehicleId,userId){
- // Never remove the original photo of a vehicle associated with any generation or another draft.
- const existing=(await client.query(`SELECT id FROM vehicles WHERE id=$1 AND telegram_id=$2 FOR UPDATE`,[vehicleId,userId])).rows[0];
- if(!existing)return;
- const inUse=(await client.query(`SELECT EXISTS(SELECT 1 FROM drafts WHERE vehicle_id=$1)
- OR EXISTS(SELECT 1 FROM generations WHERE telegram_id=$2 AND options->>'vehicleId'=$1::text) AS busy`,[vehicleId,userId])).rows[0]?.busy;
- if(inUse)return;
- await client.query('DELETE FROM photo_consents WHERE vehicle_id=$1 AND telegram_id=$2',[vehicleId,userId]);
- await client.query('DELETE FROM vehicles WHERE id=$1 AND telegram_id=$2',[vehicleId,userId]);
-}
+// SK-078: a saved car is a persistent garage record, independent from a draft.
+// Expiring/removing a draft must never silently delete the vehicle or its photos.
+// Only the explicit, confirmed DELETE /api/vehicles/:id removes a vehicle.
 
 export async function deleteDraft(db,userId,id){
  if(!uuid(id))throw problem(400,'INVALID_DRAFT');
@@ -69,7 +63,6 @@ export async function deleteDraft(db,userId,id){
  try{
   await client.query('BEGIN');
   const row=(await client.query('DELETE FROM drafts WHERE id=$1 AND telegram_id=$2 RETURNING vehicle_id',[id,userId])).rows[0];
-  if(row)await deleteOrphanedSource(client,row.vehicle_id,userId);
   await client.query('COMMIT');return !!row;
  }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
 }
@@ -78,8 +71,7 @@ export async function cleanupExpiredDrafts(db){
  const c=await db.connect();
  try{
   await c.query('BEGIN');
-  const expired=(await c.query("DELETE FROM drafts WHERE updated_at<=now()-interval '7 days' RETURNING vehicle_id,telegram_id")).rows;
-  for(const d of expired)await deleteOrphanedSource(c,d.vehicle_id,d.telegram_id);
+  const expired=(await c.query("DELETE FROM drafts WHERE updated_at<=now()-interval '7 days' RETURNING id")).rows;
   await c.query('COMMIT');return expired.length;
  }catch(error){await c.query('ROLLBACK');throw error;}finally{c.release();}
 }

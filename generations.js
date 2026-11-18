@@ -9,16 +9,17 @@ export const MODEL=process.env.IMAGE_EDIT_MODEL||'gpt-image-2.5-sunburst';
 export const uuid=s=>typeof s==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(s);
 export function problem(status,code){return Object.assign(Error(code),{status,code});}
 export function optionsOf(o){
- const allowed=['color','finish','wheel','wheelSku','custom','vehicleId','mode','draftId'];
+ const allowed=['color','finish','wheel','wheelSku','custom','vehicleId','photoId','mode','draftId'];
  if(!o||!(Object.hasOwn(COLORS,o.color)||/^#[0-9a-f]{6}$/i.test(o.color))||!Object.hasOwn(FINISHES,o.finish)||Object.keys(o).some(k=>!allowed.includes(k)))throw problem(400,'INVALID_OPTIONS');
  if(o.vehicleId!==undefined&&!uuid(o.vehicleId))throw problem(400,'INVALID_OPTIONS');
  if(o.draftId!==undefined&&!uuid(o.draftId))throw problem(400,'INVALID_OPTIONS');
+  if(o.photoId!==undefined&&(!uuid(o.photoId)||!o.vehicleId))throw problem(400,'INVALID_OPTIONS');
  if(o.mode!==undefined&&!['builder','free'].includes(o.mode))throw problem(400,'INVALID_OPTIONS');
  const wheel=o.wheel??'original',custom=o.custom??'';
  if(wheel!=='original'||(o.wheelSku!==undefined&&!isWheelSku(o.wheelSku))||typeof custom!=='string'||custom.length>1000)throw problem(400,'INVALID_OPTIONS');
  // Free editing cannot mix preset choices with the user's own instructions.
  if(o.mode==='free'&&(!custom.trim()||o.color!=='original'||o.finish!=='original'||wheel!=='original'||o.wheelSku))throw problem(400,'INVALID_OPTIONS');
- return {...(o.vehicleId?{vehicleId:o.vehicleId}:{}),...(o.draftId?{draftId:o.draftId}:{}),...(o.mode?{mode:o.mode}:{}),color:o.color.startsWith('#')?o.color.toUpperCase():o.color,finish:o.finish,...(o.wheelSku?{wheelSku:o.wheelSku}:{}),...(custom.trim()?{custom:custom.trim()}:{})};
+ return {...(o.vehicleId?{vehicleId:o.vehicleId}:{}),...(o.draftId?{draftId:o.draftId}:{}),...(o.photoId?{photoId:o.photoId}:{}),...(o.mode?{mode:o.mode}:{}),color:o.color.startsWith('#')?o.color.toUpperCase():o.color,finish:o.finish,...(o.wheelSku?{wheelSku:o.wheelSku}:{}),...(custom.trim()?{custom:custom.trim()}:{})};
 }
 export function admitWheelOptions(options,config=process.env,userId){
  if(!options.wheelSku)return options;
@@ -59,6 +60,7 @@ export async function enqueue(db,userId,key,source,options){
   const owner=(await c.query('SELECT balance,credit_debt FROM users WHERE telegram_id=$1 FOR UPDATE',[userId])).rows[0];
   const previous=(await c.query('SELECT * FROM generations WHERE telegram_id=$1 AND request_key=$2',[userId,key])).rows[0];
   if(previous){if(previous.request_hash!==hash)throw problem(409,'REQUEST_KEY_REUSED');return {job:viewJob(previous),balance:owner.balance};}
+  if(options.vehicleId){const row=(await c.query('SELECT id FROM vehicles WHERE id=$1 AND telegram_id=$2 FOR UPDATE',[options.vehicleId,userId])).rows[0];if(!row)throw problem(404,'VEHICLE_NOT_FOUND');}
   if(owner?.credit_debt>0)throw problem(402,'CREDIT_DEBT');
   if(!owner||owner.balance<1)throw problem(402,'NO_CREDITS');
   const counts=(await c.query(`SELECT count(*) FILTER(WHERE telegram_id=$1 AND status IN ('queued','processing')) AS active,
@@ -67,7 +69,7 @@ export async function enqueue(db,userId,key,source,options){
    count(*) FILTER(WHERE status IN ('queued','processing')) AS pending,
    count(*) FILTER(WHERE NOT archived) AS total FROM generations`,[userId])).rows[0];
   if(Number(counts.active)>0)throw problem(409,'JOB_ACTIVE');
-  if(Number(counts.stored)>=20)throw problem(429,'GARAGE_FULL');
+  if(Number(counts.stored)>=100)throw problem(429,'GARAGE_FULL');
   if(Number(counts.daily)>=10)throw problem(429,'DAILY_LIMIT');
   if(Number(counts.pending)>=20||Number(counts.total)>=200)throw problem(503,'CAPACITY_LIMIT');
   const id=randomUUID();

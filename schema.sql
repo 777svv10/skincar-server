@@ -103,3 +103,23 @@ CREATE TABLE IF NOT EXISTS drafts (
 );
 CREATE INDEX IF NOT EXISTS drafts_owner_updated ON drafts(telegram_id,updated_at DESC);
 CREATE INDEX IF NOT EXISTS drafts_expiration ON drafts(updated_at);
+
+-- SK-078: UUID-owned cars have structured identity independent of labels.
+-- Existing car IDs, images, consents, credits and drafts remain untouched.
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS make TEXT;
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS model TEXT;
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS generation TEXT;
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS modification TEXT;
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS nickname TEXT;
+CREATE INDEX IF NOT EXISTS vehicles_make_model_owner ON vehicles(telegram_id,make,model);
+-- Extra photos of the same physical vehicle (primary photo remains in vehicles).
+CREATE TABLE IF NOT EXISTS vehicle_photos (
+ id UUID PRIMARY KEY,
+ vehicle_id UUID NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+ telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+ source_image BYTEA NOT NULL,
+ original_image BYTEA NOT NULL,
+ original_mime TEXT NOT NULL CHECK(original_mime IN ('image/jpeg','image/png','image/webp')),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS vehicle_photos_owner ON vehicle_photos(telegram_id,vehicle_id,created_at DESC);

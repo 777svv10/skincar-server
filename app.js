@@ -7,6 +7,7 @@ import {wheelAccess} from './wheel-library.js';
 import {validateInitData} from './auth.js';
 import {normalizeNickname,claimNickname,nicknameQuota} from './nickname.js';
 import {listDrafts,saveDraft,deleteDraft} from './drafts.js';
+import {vehicleMetadata,vehicleView} from './vehicle-metadata.js';
 export function createHandler(db,config=process.env){
 const {BOT_TOKEN,WEBHOOK_SECRET}=config;
 const APP_URL=config.APP_URL||'https://skincar01.netlify.app/';
@@ -55,31 +56,124 @@ return async(req,res)=>{
     if(path==='/api/payments/catalog'&&req.method==='GET')return reply(res,200,catalog(user.telegram_id,config));
     if(path==='/api/payments/invoice'&&req.method==='POST'){const b=await body(req);return reply(res,200,await createInvoice(db,user.telegram_id,b.packId,telegram,config));}
     if(path==='/api/payments/history'&&req.method==='GET'){const r=await db.query('SELECT r.order_id,r.stars,r.credits,r.created_at,r.refunded_at FROM payment_receipts r WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 50',[user.telegram_id]);return reply(res,200,{purchases:r.rows,balance:user.balance});}
-    if(path==='/api/vehicles'&&req.method==='GET'){return reply(res,200,{vehicles:(await db.query('SELECT id,name,created_at FROM vehicles WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 20',[user.telegram_id])).rows});}
+    if(path==='/api/vehicles'&&req.method==='GET'){
+      const items=(await db.query(`SELECT v.id,v.name,v.make,v.model,v.generation,v.modification,v.nickname,v.created_at,
+       (1+(SELECT count(*) FROM vehicle_photos p WHERE p.vehicle_id=v.id)) AS photo_count
+       FROM vehicles v WHERE v.telegram_id=$1 ORDER BY v.created_at DESC LIMIT 100`,[user.telegram_id])).rows;
+      return reply(res,200,{vehicles:items.map(vehicleView)});
+    }
     if(path==='/api/vehicles'&&req.method==='POST'){
-      const b=await body(req,15*1024*1024+8192);const name=typeof b.name==='string'?b.name.trim().replace(/\s+/g,' '):'';
-      if(!uuid(b.id)||name.length<2||name.length>80||/[\x00-\x1f<>]/.test(name))return reply(res,400,{code:'INVALID_VEHICLE'});
+      const b=await body(req,15*1024*1024+8192);
+      if(!uuid(b.id))return reply(res,400,{code:'INVALID_VEHICLE'});
+      const meta=vehicleMetadata(b,{allowLegacy:true}),name=meta.name;
       requireConsent(b.consent);const source=await imageOf(b.image);
       const c=await db.connect();try{await c.query('BEGIN');await c.query('SELECT telegram_id FROM users WHERE telegram_id=$1 FOR UPDATE',[user.telegram_id]);
        const existing=(await c.query('SELECT id,name,source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[b.id,user.telegram_id])).rows[0];
        if(existing){const h=imageHashes(b.image,source);if(!h.includes(digest(existing.source_image)))throw Object.assign(Error(),{status:409,code:'PHOTO_MISMATCH'});const consent=await recordConsent(c,user.telegram_id,b.id,b.image,source,b.consent);await c.query('COMMIT');return reply(res,200,{vehicle:{id:existing.id,name:existing.name},consent});}
-       const count=(await c.query('SELECT count(*) AS n FROM vehicles WHERE telegram_id=$1',[user.telegram_id])).rows[0];if(Number(count.n)>=20)throw Object.assign(Error(),{status:429,code:'VEHICLE_LIMIT'});
-       const vehicle=(await c.query('INSERT INTO vehicles(id,telegram_id,name,source_image,original_image,original_mime) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name',[b.id,user.telegram_id,name,source,Buffer.from(b.image.split(',')[1],'base64'),b.image.slice(5,b.image.indexOf(';'))])).rows[0];const consent=await recordConsent(c,user.telegram_id,b.id,b.image,source,b.consent);await c.query('COMMIT');return reply(res,201,{vehicle,consent});
+       const count=(await c.query('SELECT count(*) AS n FROM vehicles WHERE telegram_id=$1',[user.telegram_id])).rows[0];if(Number(count.n)>=100)throw Object.assign(Error(),{status:429,code:'VEHICLE_LIMIT'});
+       const vehicle=(await c.query('INSERT INTO vehicles(id,telegram_id,name,source_image,original_image,original_mime,make,model,generation,modification,nickname) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id,name,make,model,generation,modification,nickname',[b.id,user.telegram_id,name,source,Buffer.from(b.image.split(',')[1],'base64'),b.image.slice(5,b.image.indexOf(';')),meta.make,meta.model,meta.generation,meta.modification,meta.nickname])).rows[0];const consent=await recordConsent(c,user.telegram_id,b.id,b.image,source,b.consent);await c.query('COMMIT');return reply(res,201,{vehicle,consent});
       }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+    }
+    // SK-078: owner may attach a *new photo* to an existing car without overwriting its primary photo.
+    const extraPhotoPath=/^\/api\/vehicles\/([a-f0-9-]+)\/photos$/.exec(path);
+    if(extraPhotoPath){
+      const id=extraPhotoPath[1];if(!uuid(id))return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+      if(req.method==='GET'){
+        const owner=(await db.query('SELECT id FROM vehicles WHERE id=$1 AND telegram_id=$2',[id,user.telegram_id])).rows[0];
+        if(!owner)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+        const rows=(await db.query(`SELECT id,created_at FROM vehicle_photos WHERE vehicle_id=$1 AND telegram_id=$2 ORDER BY created_at DESC LIMIT 100`,[id,user.telegram_id])).rows;
+        return reply(res,200,{photos:[{id,primary:true},...rows.map(r=>({id:r.id,createdAt:r.created_at,primary:false}))]});
+      }
+      if(req.method==='POST'){
+        const b=await body(req,15*1024*1024+8192);
+        if(!uuid(b.photoId)||b.photoId===id)return reply(res,400,{code:'INVALID_PHOTO'});
+        requireConsent(b.consent);
+        const processed=await imageOf(b.image);
+        const c=await db.connect();
+        try{
+          await c.query('BEGIN');
+          const car=(await c.query('SELECT id,name,make,model,generation,modification,nickname FROM vehicles WHERE id=$1 AND telegram_id=$2 FOR UPDATE',[id,user.telegram_id])).rows[0];
+          if(!car)throw Object.assign(Error(),{status:404,code:'VEHICLE_NOT_FOUND'});
+          const original=Buffer.from(b.image.split(',')[1],'base64'),mime=b.image.slice(5,b.image.indexOf(';'));
+          const prev=(await c.query('SELECT id,vehicle_id,source_image FROM vehicle_photos WHERE id=$1 AND telegram_id=$2',[b.photoId,user.telegram_id])).rows[0];
+          if(prev){if(String(prev.vehicle_id)!==id||digest(prev.source_image)!==digest(processed))throw Object.assign(Error(),{status:409,code:'PHOTO_MISMATCH'});}
+          else{
+            const count=(await c.query('SELECT count(*) AS n FROM vehicle_photos WHERE vehicle_id=$1',[id])).rows[0];
+            if(Number(count.n)>=99)throw Object.assign(Error(),{status:429,code:'VEHICLE_PHOTO_LIMIT'});
+            await c.query('INSERT INTO vehicle_photos(id,vehicle_id,telegram_id,source_image,original_image,original_mime) VALUES($1,$2,$3,$4,$5,$6)',[b.photoId,id,user.telegram_id,processed,original,mime]);
+          }
+          const consent=await recordConsent(c,user.telegram_id,id,b.image,processed,b.consent);
+          await c.query('COMMIT');return reply(res,prev?200:201,{vehicle:car,photo:{id:b.photoId},consent});
+        }catch(err){await c.query('ROLLBACK');throw err;}finally{c.release();}
+      }
+    }
+    const extraPhotoThumb=/^\/api\/vehicles\/([a-f0-9-]+)\/photos\/([a-f0-9-]+)\/thumbnail$/.exec(path);
+    if(extraPhotoThumb&&req.method==='GET'){
+      const [,vehicleId,photoId]=extraPhotoThumb;
+      if(!uuid(vehicleId)||!uuid(photoId))return reply(res,404,{code:'PHOTO_NOT_FOUND'});
+      const row=(await db.query('SELECT p.source_image FROM vehicle_photos p JOIN vehicles v ON v.id=p.vehicle_id WHERE p.id=$1 AND p.vehicle_id=$2 AND p.telegram_id=$3 AND v.telegram_id=$3',[photoId,vehicleId,user.telegram_id])).rows[0];
+      if(!row)return reply(res,404,{code:'PHOTO_NOT_FOUND'});
+      const thumb=await sharp(row.source_image).resize(480,320,{fit:'inside',withoutEnlargement:true}).jpeg({quality:72}).toBuffer();
+      res.writeHead(200,{'Content-Type':'image/jpeg','Cache-Control':'private, no-store','Content-Length':thumb.length});return res.end(thumb);
+    }
+    const extraPhotoSource=/^\/api\/vehicles\/([a-f0-9-]+)\/photos\/([a-f0-9-]+)\/source$/.exec(path);
+    if(extraPhotoSource&&req.method==='GET'){
+      const [,vehicleId,photoId]=extraPhotoSource;
+      if(!uuid(vehicleId)||!uuid(photoId))return reply(res,404,{code:'PHOTO_NOT_FOUND'});
+      const row=(await db.query(`SELECT p.original_image,p.original_mime FROM vehicle_photos p JOIN vehicles v ON v.id=p.vehicle_id
+      WHERE p.id=$1 AND p.vehicle_id=$2 AND p.telegram_id=$3 AND v.telegram_id=$3`,[photoId,vehicleId,user.telegram_id])).rows[0];
+      if(!row)return reply(res,404,{code:'PHOTO_NOT_FOUND'});
+      res.writeHead(200,{'Content-Type':row.original_mime,'Cache-Control':'private, no-store','Content-Length':row.original_image.length});return res.end(row.original_image);
+    }
+    const vehicleMetaPath=/^\/api\/vehicles\/([a-f0-9-]+)$/.exec(path);
+    if(vehicleMetaPath){
+      const id=vehicleMetaPath[1];if(!uuid(id))return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+      if(req.method==='PATCH'){
+        const b=await body(req,8192),meta=vehicleMetadata(b);
+        const result=(await db.query(`UPDATE vehicles SET name=$1,make=$2,model=$3,generation=$4,modification=$5,nickname=$6
+          WHERE id=$7 AND telegram_id=$8 RETURNING id,name,make,model,generation,modification,nickname`,[meta.name,meta.make,meta.model,meta.generation,meta.modification,meta.nickname,id,user.telegram_id])).rows[0];
+        if(!result)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+        return reply(res,200,{vehicle:result});
+      }
+      if(req.method==='DELETE'){
+        const c=await db.connect();try{
+          await c.query('BEGIN');
+          const vehicle=(await c.query('SELECT id FROM vehicles WHERE id=$1 AND telegram_id=$2 FOR UPDATE',[id,user.telegram_id])).rows[0];
+          if(!vehicle){await c.query('ROLLBACK');return reply(res,404,{code:'VEHICLE_NOT_FOUND'});}
+          const active=(await c.query(`SELECT id FROM generations WHERE telegram_id=$1 AND options->>'vehicleId'=$2 AND status IN ('queued','processing') LIMIT 1`,[user.telegram_id,id])).rows[0];
+          if(active){await c.query('ROLLBACK');return reply(res,409,{code:'VEHICLE_PROCESSING'});}
+          // Preserve monetary ledger and anonymous token usage, erase all personal image/vehicle content.
+          await c.query(`UPDATE generations SET archived=true,source_image=NULL,result_image=NULL,thumbnail=NULL,options='{}'::jsonb
+             WHERE telegram_id=$1 AND options->>'vehicleId'=$2`,[user.telegram_id,id]);
+          await c.query('DELETE FROM drafts WHERE telegram_id=$1 AND vehicle_id=$2',[user.telegram_id,id]);
+          await c.query('DELETE FROM photo_consents WHERE telegram_id=$1 AND vehicle_id=$2',[user.telegram_id,id]);
+          await c.query('DELETE FROM vehicle_photos WHERE telegram_id=$1 AND vehicle_id=$2',[user.telegram_id,id]);
+          await c.query('DELETE FROM vehicles WHERE id=$1 AND telegram_id=$2',[id,user.telegram_id]);
+          await c.query('COMMIT');return reply(res,200,{deleted:true});
+        }catch(err){await c.query('ROLLBACK');throw err;}finally{c.release();}
+      }
     }
     // SK-047..049: reusing an owner's original photo requires the existing consent,
     // not an anonymous vehicle ID or a newly fabricated agreement.
     const vehicleReusePath=/^\/api\/vehicles\/([a-f0-9-]+)\/reuse$/.exec(path);
     if(vehicleReusePath&&req.method==='GET'){
       if(!uuid(vehicleReusePath[1]))return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
-      const vehicle=(await db.query('SELECT id,name,source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[vehicleReusePath[1],user.telegram_id])).rows[0];
+      const requestedPhoto=new URL(req.url,'http://localhost').searchParams.get('photoId');
+      if(requestedPhoto&&!uuid(requestedPhoto))return reply(res,400,{code:'INVALID_PHOTO'});
+      const vehicle=(await db.query('SELECT id,name,make,model,generation,modification,nickname,source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[vehicleReusePath[1],user.telegram_id])).rows[0];
       if(!vehicle)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+      let selectedImage=vehicle.source_image;
+      if(requestedPhoto&&requestedPhoto!==vehicle.id){
+        const extra=(await db.query('SELECT source_image FROM vehicle_photos WHERE id=$1 AND vehicle_id=$2 AND telegram_id=$3',[requestedPhoto,vehicle.id,user.telegram_id])).rows[0];
+        if(!extra)return reply(res,404,{code:'PHOTO_NOT_FOUND'});
+        selectedImage=extra.source_image;
+      }
       const consent=(await db.query(`SELECT id FROM photo_consents
         WHERE vehicle_id=$1 AND telegram_id=$2 AND accepted=true
           AND text_version=$4 AND source_hash=$3
-        ORDER BY accepted_at DESC LIMIT 1`,[vehicle.id,user.telegram_id,digest(vehicle.source_image),CONSENT_VERSION])).rows[0];
+        ORDER BY accepted_at DESC LIMIT 1`,[vehicle.id,user.telegram_id,digest(selectedImage),CONSENT_VERSION])).rows[0];
       if(!consent)return reply(res,409,{code:'PHOTO_CONSENT_REQUIRED'});
-      return reply(res,200,{vehicle:{id:vehicle.id,name:vehicle.name},consentId:consent.id});
+      return reply(res,200,{vehicle:vehicleView(vehicle),photoId:requestedPhoto||vehicle.id,consentId:consent.id});
     }
     // Small private thumbnails for drafts: avoid downloading every full-size original in Garage.
     const vehicleThumbPath=/^\/api\/vehicles\/([a-f0-9-]+)\/thumbnail$/.exec(path);
@@ -102,12 +196,19 @@ return async(req,res)=>{
     if(path==='/api/generations'&&req.method==='POST'){
       if(!process.env.OPENAI_API_KEY)return reply(res,503,{code:'GENERATION_DISABLED'});
       const b=await body(req,15*1024*1024+8192);
-      if(!uuid(b.consentId)||!uuid(b.options?.vehicleId))return reply(res,400,{code:'PHOTO_CONSENT_REQUIRED'});const options=admitWheelOptions(optionsOf(b.options),config,user.telegram_id),source=await imageOf(b.image);await verifyConsent(db,user.telegram_id,b.consentId,options.vehicleId,b.image,source);options.photoConsentId=b.consentId;
+      if(!uuid(b.consentId)||!uuid(b.options?.vehicleId))return reply(res,400,{code:'PHOTO_CONSENT_REQUIRED'});const options=admitWheelOptions(optionsOf(b.options),config,user.telegram_id),source=await imageOf(b.image);await verifyConsent(db,user.telegram_id,b.consentId,options.vehicleId,b.image,source);
+      if(options.photoId){
+        const row=options.photoId===options.vehicleId
+         ?(await db.query('SELECT source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[options.vehicleId,user.telegram_id])).rows[0]
+         :(await db.query('SELECT source_image FROM vehicle_photos WHERE id=$1 AND vehicle_id=$2 AND telegram_id=$3',[options.photoId,options.vehicleId,user.telegram_id])).rows[0];
+        if(!row||digest(row.source_image)!==digest(source))return reply(res,409,{code:'PHOTO_MISMATCH'});
+      }
+      options.photoConsentId=b.consentId;
       if(options.vehicleId){const v=(await db.query('SELECT name FROM vehicles WHERE id=$1 AND telegram_id=$2',[options.vehicleId,user.telegram_id])).rows[0];if(!v)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});options.vehicleName=v.name;}
       return reply(res,202,await enqueue(db,user.telegram_id,b.requestKey,source,options));
     }
     if(path==='/api/generations'&&req.method==='GET'){
-      const jobs=await db.query('SELECT id,request_key,status,options,error_code,refunded,created_at,archived FROM generations WHERE telegram_id=$1 AND NOT archived ORDER BY created_at DESC LIMIT 20',[user.telegram_id]);
+      const jobs=await db.query('SELECT id,request_key,status,options,error_code,refunded,created_at,archived FROM generations WHERE telegram_id=$1 AND NOT archived ORDER BY created_at DESC LIMIT 100',[user.telegram_id]);
       return reply(res,200,{jobs:jobs.rows.map(viewJob),balance:user.balance});
     }
     const jobPath=/^\/api\/generations\/([^/]+)(?:\/(source|result|thumbnail))?$/.exec(path);
