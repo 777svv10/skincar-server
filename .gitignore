@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+wheel-references/
+.wheel-ref-extract-*/
+*.sqlite
+*.db
+*.sql.gz
+*.dump
+*.backup
+coverage/
