@@ -8,6 +8,7 @@ import {validateInitData} from './auth.js';
 import {normalizeNickname,claimNickname,nicknameQuota} from './nickname.js';
 import {listDrafts,saveDraft,deleteDraft} from './drafts.js';
 import {vehicleMetadata,vehicleView} from './vehicle-metadata.js';
+import {findSavedUpload} from './upload-status.js';
 export function createHandler(db,config=process.env){
 const {BOT_TOKEN,WEBHOOK_SECRET}=config;
 const APP_URL=config.APP_URL||'https://skincar01.netlify.app/';
@@ -61,6 +62,14 @@ return async(req,res)=>{
        (1+(SELECT count(*) FROM vehicle_photos p WHERE p.vehicle_id=v.id)) AS photo_count
        FROM vehicles v WHERE v.telegram_id=$1 ORDER BY v.created_at DESC LIMIT 100`,[user.telegram_id])).rows;
       return reply(res,200,{vehicles:items.map(vehicleView)});
+    }
+    // SK-085: recover a saved upload when the client did not receive the HTTP response.
+    if(path==='/api/uploads/status'&&req.method==='GET'){
+      const params=new URL(req.url,'http://localhost').searchParams;
+      const vehicleId=params.get('vehicleId'),photoId=params.get('photoId');
+      if(!uuid(vehicleId)||!uuid(photoId))return reply(res,400,{code:'INVALID_UPLOAD_ID'});
+      const record=await findSavedUpload(db,{telegramId:user.telegram_id,vehicleId,photoId,consentVersion:CONSENT_VERSION});
+      return record?reply(res,200,record):reply(res,404,{code:'UPLOAD_PENDING'});
     }
     if(path==='/api/vehicles'&&req.method==='POST'){
       const b=await body(req,15*1024*1024+8192);
