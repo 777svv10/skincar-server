@@ -24,5 +24,5 @@ test('only the daily limiter is bypassed, not the other safety limits',()=>{
  assert.match(file,/if\(Number\(counts\.daily\)>=10&&!isDailyLimitExempt\(userId\)\)throw problem\(429,'DAILY_LIMIT'\)/);
  for(const safety of ["JOB_ACTIVE","GARAGE_FULL","CAPACITY_LIMIT","NO_CREDITS","CREDIT_DEBT"])
   assert(file.includes("'"+safety+"'"),'missing required safeguard '+safety);
- assert(file.includes('UPDATE users SET balance=balance-1'));
+ assert(file.includes('UPDATE users SET balance=balance-$2'));
 });

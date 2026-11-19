@@ -2,7 +2,7 @@ import {requireConsent,recordConsent,verifyConsent,imageHashes,CONSENT_VERSION} 
 import {catalog,createInvoice,checkCheckout,settlePayment,applyRefund} from './payments.js';
 import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import sharp from 'sharp';
-import {enqueue,imageOf,optionsOf,admitWheelOptions,viewJob,uuid,grantPilot} from './generations.js';
+import {enqueue,imageOf,optionsOf,admitWheelOptions,admitFilmOptions,viewJob,uuid,grantPilot} from './generations.js';
 import {wheelAccess} from './wheel-library.js';
 import {validateInitData} from './auth.js';
 import {normalizeNickname,claimNickname,nicknameQuota} from './nickname.js';
@@ -196,7 +196,7 @@ return async(req,res)=>{
     if(path==='/api/generations'&&req.method==='POST'){
       if(!process.env.OPENAI_API_KEY)return reply(res,503,{code:'GENERATION_DISABLED'});
       const b=await body(req,15*1024*1024+8192);
-      if(!uuid(b.consentId)||!uuid(b.options?.vehicleId))return reply(res,400,{code:'PHOTO_CONSENT_REQUIRED'});const options=admitWheelOptions(optionsOf(b.options),config,user.telegram_id),source=await imageOf(b.image);await verifyConsent(db,user.telegram_id,b.consentId,options.vehicleId,b.image,source);
+      if(!uuid(b.consentId)||!uuid(b.options?.vehicleId))return reply(res,400,{code:'PHOTO_CONSENT_REQUIRED'});const options=admitFilmOptions(admitWheelOptions(optionsOf(b.options),config,user.telegram_id),config),source=await imageOf(b.image);await verifyConsent(db,user.telegram_id,b.consentId,options.vehicleId,b.image,source);
       if(options.photoId){
         const row=options.photoId===options.vehicleId
          ?(await db.query('SELECT source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[options.vehicleId,user.telegram_id])).rows[0]
@@ -204,17 +204,21 @@ return async(req,res)=>{
         if(!row||digest(row.source_image)!==digest(source))return reply(res,409,{code:'PHOTO_MISMATCH'});
       }
       options.photoConsentId=b.consentId;
-      if(options.vehicleId){const v=(await db.query('SELECT name FROM vehicles WHERE id=$1 AND telegram_id=$2',[options.vehicleId,user.telegram_id])).rows[0];if(!v)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});options.vehicleName=v.name;}
+      if(options.vehicleId){const v=(await db.query('SELECT name,make,model,generation,modification FROM vehicles WHERE id=$1 AND telegram_id=$2',[options.vehicleId,user.telegram_id])).rows[0];if(!v)return reply(res,404,{code:'VEHICLE_NOT_FOUND'});
+       options.vehicleName=v.name;
+       // Trusted database record, never a client-supplied make/model. Preserve legacy cars with no structured fields.
+       options.vehicleIdentity={make:v.make||null,model:v.model||null,generation:v.generation||null,modification:v.modification||null};
+      }
       return reply(res,202,await enqueue(db,user.telegram_id,b.requestKey,source,options));
     }
     if(path==='/api/generations'&&req.method==='GET'){
-      const jobs=await db.query('SELECT id,request_key,status,options,error_code,refunded,created_at,archived FROM generations WHERE telegram_id=$1 AND NOT archived ORDER BY created_at DESC LIMIT 100',[user.telegram_id]);
+      const jobs=await db.query('SELECT id,request_key,status,options,charged_credits,error_code,refunded,created_at,archived FROM generations WHERE telegram_id=$1 AND NOT archived ORDER BY created_at DESC LIMIT 100',[user.telegram_id]);
       return reply(res,200,{jobs:jobs.rows.map(viewJob),balance:user.balance});
     }
     const jobPath=/^\/api\/generations\/([^/]+)(?:\/(source|result|thumbnail))?$/.exec(path);
     if(jobPath){
       if(!uuid(jobPath[1]))return reply(res,404,{error:'Not found'});
-      const job=(await db.query('SELECT id,request_key,status,options,error_code,refunded,created_at,archived FROM generations WHERE id=$1 AND telegram_id=$2 AND NOT archived',[jobPath[1],user.telegram_id])).rows[0];
+      const job=(await db.query('SELECT id,request_key,status,options,charged_credits,error_code,refunded,created_at,archived FROM generations WHERE id=$1 AND telegram_id=$2 AND NOT archived',[jobPath[1],user.telegram_id])).rows[0];
       if(!job)return reply(res,404,{error:'Not found'});
       if(req.method==='DELETE'&&!jobPath[2]){
         const deleted=await db.query("UPDATE generations SET archived=true,source_image=NULL,result_image=NULL,thumbnail=NULL WHERE id=$1 AND telegram_id=$2 AND status IN ('done','failed') RETURNING id",[job.id,user.telegram_id]);

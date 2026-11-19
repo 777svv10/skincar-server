@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS generations (
  finished_at TIMESTAMPTZ,
  UNIQUE(telegram_id,request_key)
 );
+-- SK-082: price frozen per job. Old jobs were billed 1 credit.
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS charged_credits INTEGER NOT NULL DEFAULT 1 CHECK (charged_credits BETWEEN 1 AND 100);
 CREATE INDEX IF NOT EXISTS generations_queue ON generations(status,created_at);
 CREATE INDEX IF NOT EXISTS generations_owner ON generations(telegram_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS credit_ledger (

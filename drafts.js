@@ -1,6 +1,7 @@
 import {randomUUID} from 'node:crypto';
-import {COLORS, FINISHES, uuid, problem} from './generations.js';
+import {COLORS, FINISHES, uuid, problem, cleanTint, cleanPlate} from './generations.js';
 import {isWheelSku} from './wheel-library.js';
+import {isFilmSku,FILM_ZONES} from './film-library.js';
 
 export const DRAFT_RETENTION_DAYS=7;
 export const DRAFT_MAX_PER_USER=20;
@@ -12,8 +13,16 @@ export function cleanDraftOptions(value){
  const color=value.color??'original',finish=value.finish??'original',wheel=value.wheel??'original',custom=value.custom??'';
  if(!(Object.hasOwn(COLORS,color)||typeof color==='string'&&/^#[a-f0-9]{6}$/i.test(color))||!Object.hasOwn(FINISHES,finish)||wheel!=='original'||typeof custom!=='string'||custom.length>1000)throw problem(400,'INVALID_DRAFT');
  if(value.wheelSku!==undefined&&(mode!=='builder'||!isWheelSku(value.wheelSku)))throw problem(400,'INVALID_DRAFT');
+ if(value.qualityMode!==undefined&&!['standard','hd'].includes(value.qualityMode))throw problem(400,'INVALID_DRAFT');
+ if(value.coatingType==='film'){
+  if(mode!=='builder'||(value.filmSku!==undefined&&!isFilmSku(value.filmSku))||
+   (value.filmZone!==undefined&&!FILM_ZONES.includes(value.filmZone)))throw problem(400,'INVALID_DRAFT');
+ }else if(value.filmSku!==undefined||value.filmZone!==undefined)throw problem(400,'INVALID_DRAFT');
  if(value.photoId!==undefined&&!uuid(value.photoId))throw problem(400,'INVALID_DRAFT');
- return {mode,coatingType:value.coatingType??'paint',color,finish,wheel,...(value.photoId?{photoId:value.photoId}:{}),...(value.wheelSku?{wheelSku:value.wheelSku}:{}),custom,fromRepeat:!!value.fromRepeat};
+ if(mode==='free'&&(value.tint!==undefined||value.plate!==undefined))throw problem(400,'INVALID_DRAFT');
+ const tint=mode==='builder'?cleanTint(value.tint):undefined;
+ const plate=mode==='builder'?cleanPlate(value.plate):undefined;
+ return {...(tint?{tint}:{}),...(plate?{plate}:{}),qualityMode:value.qualityMode==='hd'?'hd':'standard',mode,coatingType:value.coatingType??'paint',...(value.coatingType==='film'&&value.filmSku?{filmSku:value.filmSku,filmZone:value.filmZone||'full'}:{}),color,finish,wheel,...(value.photoId?{photoId:value.photoId}:{}),...(value.wheelSku?{wheelSku:value.wheelSku}:{}),custom,fromRepeat:!!value.fromRepeat};
 }
 
 export async function listDrafts(db,userId){
