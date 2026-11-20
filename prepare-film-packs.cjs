@@ -66,23 +66,34 @@ for(const id of packIds){
  }
 }
 if(models!==151)fail('expected 151 SKUs');
-const temp=path.join(base,'.film-packs-tmp-'+process.pid),backup=path.join(base,'.film-packs-old-'+process.pid);
-fs.rmSync(temp,{recursive:true,force:true});fs.rmSync(backup,{recursive:true,force:true});
-fs.mkdirSync(temp,{recursive:true});
-let moved=false;
+// SK-091.1: Never rename the film-packs directory itself. On Railway it can be
+// a mounted volume, so moving it outside the mount causes EXDEV and crashes.
+// Instead write a temporary file in *each destination directory* and rename
+// within that same filesystem. The manifest is installed last; no cleanup of
+// existing packs occurs, avoiding accidental loss of user/server assets.
+fs.mkdirSync(target,{recursive:true});
+function atomicWrite(rel,buf){
+ const dest=path.join(target,...rel.split('/'));
+ const dir=path.dirname(dest);
+ fs.mkdirSync(dir,{recursive:true});
+ const tmp=path.join(dir,'.'+path.basename(dest)+'.sk0911-'+crypto.randomUUID()+'.tmp');
+ try{
+  fs.writeFileSync(tmp,buf,{mode:0o644});
+  fs.renameSync(tmp,dest); // Same destination directory / mount.
+ }finally{
+  try{fs.rmSync(tmp,{force:true});}catch{}
+ }
+}
 try{
  for(const [name,buf] of contents){
-   const rel=name.slice('film-packs/'.length);
-   const dest=path.join(temp,...rel.split('/'));
-   fs.mkdirSync(path.dirname(dest),{recursive:true});
-   fs.writeFileSync(dest,buf,{mode:0o644});
+  if(name==='film-packs/index.json')continue;
+  atomicWrite(name.slice('film-packs/'.length),buf);
  }
- fs.writeFileSync(path.join(temp,'.bundle.sha256'),EXPECTED_HASH);
- if(fs.existsSync(target)){fs.renameSync(target,backup);moved=true;}
- try{fs.renameSync(temp,target);}catch(e){
-  if(moved && fs.existsSync(backup))fs.renameSync(backup,target);
-  throw e;
- }
- fs.rmSync(backup,{recursive:true,force:true});
+ // Install index after all pack.json and WebP references have been written.
+ atomicWrite('index.json',contents.get('film-packs/index.json'));
+ atomicWrite('.bundle.sha256',Buffer.from(EXPECTED_HASH,'utf8'));
  console.log('SK091 film references ready: '+models+' models, '+contents.size+' files');
-}catch(e){fs.rmSync(temp,{recursive:true,force:true});throw e;}
+}catch(e){
+ // Leave pre-existing content intact. The stamp is written only on success.
+ fail('mount-safe install failed: '+e.message);
+}
