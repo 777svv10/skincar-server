@@ -78,12 +78,12 @@ export function admitWheelOptions(options,config=process.env,userId){
  const record=authorizeWheelSku(options.wheelSku,config,userId);
  return {...options,wheelBrand:record.brand,wheelName:record.name,wheelReferenceSha256:record.sha256};
 }
-export function admitFilmOptions(options,config=process.env){
+export function admitFilmOptions(options,config=process.env,userId){
  if(!options.filmSku)return options;
- const r=authorizeFilmSku(options.filmSku,config);
+ const r=authorizeFilmSku(options.filmSku,config,userId);
  return {...options,filmBrand:r.brand,filmSeries:r.series,filmName:r.name,
   filmManufacturerSku:r.manufacturerSku,filmFinish:r.finish,filmEffect:r.effect,
-  filmReferenceSha256:filmReferenceHash(options.filmSku,config)};
+  filmReferenceSha256:filmReferenceHash(options.filmSku,config,userId)};
 }
 export function vehicleContext(o){
  const v=o.vehicleIdentity;
@@ -213,7 +213,7 @@ export async function editWithOpenAI(job,fetcher=fetch){
  }else if(job.options.wheel&&job.options.wheel!=='original')throw problem(400,'WHEEL_NOT_FOUND');
   if(job.options.filmSku){
    // Revoked rights, removed asset or changed SHA must stop the paid request.
-   filmReference=loadFilmReference(job.options.filmSku,job.options.filmReferenceSha256,process.env);
+   filmReference=loadFilmReference(job.options.filmSku,job.options.filmReferenceSha256,process.env,job.telegram_id);
   }
   await moderateCustom(job.options.custom,fetcher);
  const form=new FormData();form.set('model',job.model);

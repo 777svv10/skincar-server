@@ -5,6 +5,6 @@
 **Используйте `DEPLOY_19_11.md` как актуальную инструкцию.**
 
 
-## SK-087 — film generation activation
-- Film packs in `film-packs/` are active by default when items are marked `skuVerified: true` and `imageRights: "approved"`.
-- `FILM_APPROVED_SKUS` is now optional. Leave it empty to allow all active verified SKUs, or set a comma-separated allowlist to restrict production.
+
+## SK-089 — public film beta (IMPORTANT)
+See `DEPLOY_SK088.md`. The three packs must be uploaded with all nested assets. For public beta set `FILM_GENERATION_MODE=public_beta` in Railway. Unset mode remains off. Keep film metadata unverified until independent approval.

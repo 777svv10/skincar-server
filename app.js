@@ -4,6 +4,7 @@ import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import sharp from 'sharp';
 import {enqueue,imageOf,optionsOf,admitWheelOptions,admitFilmOptions,viewJob,uuid,grantPilot} from './generations.js';
 import {wheelAccess} from './wheel-library.js';
+import {filmAccess} from './film-library.js';
 import {validateInitData} from './auth.js';
 import {normalizeNickname,claimNickname,nicknameQuota} from './nickname.js';
 import {listDrafts,saveDraft,deleteDraft} from './drafts.js';
@@ -54,6 +55,7 @@ return async(req,res)=>{
     const {rows}=await db.query(`SELECT u.* FROM sessions s JOIN users u USING(telegram_id) WHERE s.token_hash=$1 AND s.expires_at>now()`,[digest(bearer[1])]);
     const user=rows[0];if(!user)return reply(res,401,{error:'Session expired'});
     if(path==='/api/wheels/availability'&&req.method==='GET')return reply(res,200,wheelAccess(config,user.telegram_id));
+    if(path==='/api/films/availability'&&req.method==='GET')return reply(res,200,filmAccess(config,user.telegram_id));
     if(path==='/api/payments/catalog'&&req.method==='GET')return reply(res,200,catalog(user.telegram_id,config));
     if(path==='/api/payments/invoice'&&req.method==='POST'){const b=await body(req);return reply(res,200,await createInvoice(db,user.telegram_id,b.packId,telegram,config));}
     if(path==='/api/payments/history'&&req.method==='GET'){const r=await db.query('SELECT r.order_id,r.stars,r.credits,r.created_at,r.refunded_at FROM payment_receipts r WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 50',[user.telegram_id]);return reply(res,200,{purchases:r.rows,balance:user.balance});}
@@ -205,7 +207,7 @@ return async(req,res)=>{
     if(path==='/api/generations'&&req.method==='POST'){
       if(!process.env.OPENAI_API_KEY)return reply(res,503,{code:'GENERATION_DISABLED'});
       const b=await body(req,15*1024*1024+8192);
-      if(!uuid(b.consentId)||!uuid(b.options?.vehicleId))return reply(res,400,{code:'PHOTO_CONSENT_REQUIRED'});const options=admitFilmOptions(admitWheelOptions(optionsOf(b.options),config,user.telegram_id),config),source=await imageOf(b.image);await verifyConsent(db,user.telegram_id,b.consentId,options.vehicleId,b.image,source);
+      if(!uuid(b.consentId)||!uuid(b.options?.vehicleId))return reply(res,400,{code:'PHOTO_CONSENT_REQUIRED'});const options=admitFilmOptions(admitWheelOptions(optionsOf(b.options),config,user.telegram_id),config,user.telegram_id),source=await imageOf(b.image);await verifyConsent(db,user.telegram_id,b.consentId,options.vehicleId,b.image,source);
       if(options.photoId){
         const row=options.photoId===options.vehicleId
          ?(await db.query('SELECT source_image FROM vehicles WHERE id=$1 AND telegram_id=$2',[options.vehicleId,user.telegram_id])).rows[0]
