@@ -16,7 +16,9 @@ test('unknown film zone blocked',()=>assert.throws(()=>optionsOf({...film,filmZo
 test('film cannot use unrelated paint settings',()=>assert.throws(()=>optionsOf({...film,color:'black'}),{code:'INVALID_FILM'}));
 test('free mode film blocked',()=>assert.throws(()=>optionsOf({...film,mode:'free',custom:'wrap car'}),{code:'INVALID_FILM'}));
 test('traversal ids cannot be valid film sku',()=>assert.equal(isFilmSku('../etc/passwd'),false));
-test('empty registry blocks even a whitelisted sku',()=>assert.throws(()=>authorizeFilmSku(sku,{FILM_APPROVED_SKUS:sku}),{code:'FILM_NOT_APPROVED'}));
+test('unknown sku outside registry stays blocked',()=>assert.throws(()=>authorizeFilmSku(sku,{FILM_APPROVED_SKUS:sku}),{code:'FILM_NOT_APPROVED'}));
+test('active verified sku works without explicit FILM_APPROVED_SKUS allowlist',()=>{const record=authorizeFilmSku('vega-color-ppf/ppf-101',{});assert.equal(record.manufacturerSku,'PPF-101');assert.equal(record.finish,'gloss');});
+test('allowlist can still restrict generation to a subset of active skus',()=>assert.throws(()=>authorizeFilmSku('vega-color-premium/vcp-1',{FILM_APPROVED_SKUS:'vega-color-ppf/ppf-101'}),{code:'FILM_NOT_APPROVED'}));
 test('draft persists film sku + selected zone',()=>{const r=cleanDraftOptions({...film,coatingType:'film',custom:''});assert.equal(r.filmSku,sku);assert.equal(r.filmZone,'roof')});
 test('legacy paint draft still works',()=>{const r=cleanDraftOptions({...basic,custom:'',coatingType:'paint'});assert.equal(r.filmSku,undefined)});
 test('film draft cannot be free-editor selection',()=>assert.throws(()=>cleanDraftOptions({...film,mode:'free',custom:'test'}),{code:'INVALID_DRAFT'}));

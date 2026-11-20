@@ -1,6 +1,6 @@
 // SK-008 server-only film reference registry. Default is empty: no fabricated catalogue items.
-// Adding public Netlify packs alone cannot enable paid generation. Operators must also install
-// verified assets here and explicitly approve SKUs via FILM_APPROVED_SKUS in Railway.
+// Film generation uses only repository packs whose items are marked verified and rights-approved.
+// Operators may optionally restrict production to a subset of SKUs via FILM_APPROVED_SKUS in Railway.
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
@@ -46,10 +46,10 @@ function catalogue(){
 }
 export function authorizeFilmSku(sku,config=process.env){
  if(!isFilmSku(sku))throw fail('FILM_NOT_APPROVED');
- const whitelist=typeof config.FILM_APPROVED_SKUS==='string'?config.FILM_APPROVED_SKUS.split(',').map(s=>s.trim()):[];
- if(!whitelist.includes(sku))throw fail('FILM_NOT_APPROVED');
+ const whitelist=typeof config.FILM_APPROVED_SKUS==='string'?config.FILM_APPROVED_SKUS.split(',').map(s=>s.trim()).filter(Boolean):[];
  const record=catalogue().get(sku);
  if(!record)throw fail('FILM_NOT_APPROVED');
+ if(whitelist.length && !whitelist.includes(sku))throw fail('FILM_NOT_APPROVED');
  return record;
 }
 export function loadFilmReference(sku,sha,config=process.env){
