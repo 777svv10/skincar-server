@@ -9,9 +9,9 @@ export const FINISHES={original:'unchanged original finish',gloss:'glossy',matte
 export const MODEL=process.env.IMAGE_EDIT_MODEL||'gpt-image-2.5-sunburst';
 // SK-023 + SK-084: persist only server-validated options, never an arbitrary client prompt.
 export const TINT_ZONES=Object.freeze(['windshield','frontSides','rearSides','rearWindshield']);
-export const TINT_FILMS=Object.freeze(['none','dark','colored','chameleon']);
-export const TINT_VLT=Object.freeze([5,15,20,35,50,70,80,90]); // Visible-light transmission (%)
-export const TINT_COLORS=Object.freeze(['smoke','graphite','blue','green','bronze','purple']);
+export const TINT_FILMS=Object.freeze(['none','dark','colored','chameleon','athermal']);
+export const TINT_VLT=Object.freeze([5,10,15,20,35,50,70,80,90]); // Visible-light transmission (%)
+export const TINT_COLORS=Object.freeze(['smoke','graphite','blue','green','bronze','purple','red','yellow']);
 export function cleanTint(value){
  if(value===undefined||value===null)return undefined;
  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!TINT_ZONES.includes(k)))throw problem(400,'INVALID_TINT');
@@ -29,6 +29,10 @@ export function cleanTint(value){
    if(item.film==='colored'){
     if(!TINT_COLORS.includes(item.color))throw problem(400,'INVALID_TINT');
     result[zone]={film:item.film,vlt:item.vlt,color:item.color};
+   }else if(item.film==='chameleon'){
+    // Backward compatible: old clients sent no color; new tint panel can specify a hue.
+    if(item.color!==undefined&&!TINT_COLORS.includes(item.color))throw problem(400,'INVALID_TINT');
+    result[zone]={film:item.film,vlt:item.vlt,...(item.color?{color:item.color}:{})};
    }else{
     if(item.color!==undefined)throw problem(400,'INVALID_TINT');
     result[zone]={film:item.film,vlt:item.vlt};
@@ -98,7 +102,7 @@ export function tintInstructions(value){
  const requested=TINT_ZONES.filter(z=>tint[z]?.film&&tint[z].film!=='none');
  if(!requested.length)return '';
  const lines=requested.map(z=>{
-  const t=tint[z];const film=t.film==='dark'?'neutral dark tint':t.film==='colored'?'colored '+t.color+' tint':'chameleon iridescent tint';
+  const t=tint[z];const film=t.film==='dark'?'neutral dark tint':t.film==='colored'?'colored '+t.color+' tint':t.film==='athermal'?'subtle athermal heat-control film with natural near-transparent reflections':'chameleon iridescent tint'+(t.color?' with '+t.color+' reflective hue':'');
   return names[z]+': '+film+', target visible-light transmission (VLT) approx '+t.vlt+'%';
  });
  return 'Apply automotive window film only to the specified visible glass zones: '+lines.join('; ')+'. Keep the remaining glass unchanged; do not tint body panels, lighting or windscreen markings. Keep natural transparency, depth and reflections; VLT is a visual target, not a legal compliance certification. Never invent invisible windows. ';
