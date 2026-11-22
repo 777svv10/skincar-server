@@ -216,7 +216,7 @@ CREATE TABLE IF NOT EXISTS api_rate_limits (
 );
 CREATE INDEX IF NOT EXISTS api_rate_limits_expiration ON api_rate_limits(window_start);
 
--- SK-111: durable admin-only input dialogs; no user access from the Mini App.
+-- SK-110.2: durable admin-only input dialogs; no user access from the Mini App.
 CREATE TABLE IF NOT EXISTS bot_admin_input_state (
  telegram_id BIGINT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
  action TEXT NOT NULL CHECK(action IN ('credit','debit','promo','promo_confirm','ticket_reply')),

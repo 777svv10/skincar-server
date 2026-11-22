@@ -128,7 +128,7 @@ function menuMarkup(lang,url,isAdmin=false,garageEnabled=true){const rows=[
  ];if(isAdmin)rows.push([button(texts.admin(lang),'a')]);return makeButtons(rows);
 }
 
-// SK-111 / Bot Admin UI: visible only after a fresh allowlist check.
+// SK-110.2 / Bot Admin UI: visible only after a fresh allowlist check.
 export function adminHomeKeyboard(){return makeButtons([
  [button('📊 Статистика','a:stats_today'),button('💵 Себестоимость','a:cost_today')],
  [button('👥 Пользователи','a:users'),button('🖼 Генерации','a:jobs')],
@@ -476,14 +476,14 @@ export function createBotService({db,config,send,upload}){
   const id=arg.trim();if(!isUuid(id))return tell(uid,'Используй: /close <UUID тикета>');
   const r=await db.query(`UPDATE bot_tickets SET status='closed' WHERE id=$1 AND status IN ('open','answered') RETURNING telegram_id`,[id]);
   if(!r.rows.length)return tell(uid,'Тикет уже закрыт или не найден.');
-  await tell(uid,'Тикет закрыт.');
+  await tell(uid,'✅ Обращение закрыто.',makeButtons([[button('⬅️ К обращениям','a:tickets')],[button('⬅️ Админка','a')]]));
   try{await tell(r.rows[0].telegram_id,`✅ Обращение ${id.slice(0,8)} закрыто.`);}catch{}
  }
  async function adminReply(uid,body){const m=/^([a-f0-9-]{36})\s+([\s\S]{2,1500})$/i.exec(body.trim());if(!m||!isUuid(m[1]))return tell(uid,'Используй: /reply <UUID тикета> <текст>');
   const t=(await db.query(`SELECT id,telegram_id FROM bot_tickets WHERE id=$1 AND status IN ('open','answered')`,[m[1]])).rows[0];if(!t)return tell(uid,'Тикет не найден или уже закрыт.');
   await tell(t.telegram_id,`✉️ Поддержка SkinCar\nОбращение ${t.id.slice(0,8)}:\n${slice(m[2],1500)}`);
   await db.query(`UPDATE bot_tickets SET status='answered',answer=$2,answered_at=now(),admin_id=$3 WHERE id=$1 AND status IN ('open','answered')`,[t.id,slice(m[2],1500),uid]);
-  return tell(uid,'Ответ отправлен.');
+  return tell(uid,'✉️ Ответ отправлен.',makeButtons([[button('⬅️ К обращению',`a:ticket:${t.id}`)],[button('⬅️ К обращениям','a:tickets')]]));
  }
  async function adminMenu(uid){
   await clearAdminInput(uid);
