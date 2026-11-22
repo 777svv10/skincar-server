@@ -437,7 +437,7 @@ export function createBotService({db,config,send,upload}){
   if(!m)return tell(uid,'Синтаксис: /makepromo <1–20 генераций> <1–100 активаций> <1–30 дней>');
   if(!await checkRate(db,uid,'admin_promo',5,3600))return tell(uid,'Лимит промокодов на час исчерпан.');
   try{const p=await issuePromo(db,{adminId:uid,credits:Number(m[1]),maxUses:Number(m[2]),days:Number(m[3]),botToken:config.BOT_TOKEN});
-   return tell(uid,`Промокод: ${p.code}\n${p.credits} генераций; ${p.maxUses} активаций; ${p.days} дней. Код отображается один раз; сохрани его. Пользователь активирует /promo КОД.`);
+   return tell(uid,`✅ Промокод создан: ${p.code}\n${p.credits} генераций; ${p.maxUses} активаций; ${p.days} дней. Код отображается один раз; сохрани его. Пользователь активирует /promo КОД.`,makeButtons([[button('⬅️ К промокодам','a:promos')]]));
   }catch(e){return tell(uid,`Невозможно выпустить промокод: ${e.code||'INVALID_PROMO'}`);}
  }
  async function userPromo(uid,lang,code){
@@ -448,9 +448,9 @@ export function createBotService({db,config,send,upload}){
  }
  async function confirmCredit(uid,id,confirm){
   try{
-   if(!confirm){const result=await cancelCreditAction(db,{adminId:uid,id});return tell(uid,result?'Отменено.':'Заявка не найдена.');}
+   if(!confirm){const result=await cancelCreditAction(db,{adminId:uid,id});return tell(uid,result?'Отменено.':'Заявка не найдена.',makeButtons([[button('⬅️ К балансам','a:credits')]]));}
    const out=await confirmCreditAction(db,{adminId:uid,id});
-   await tell(uid,`✅ Изменение проведено: ${out.targetId}, ${out.delta>0?'+':''}${out.delta}; баланс изменён на ${out.applied}, погашено долга ${out.debtRepaid}. Аудит сохранён.`);
+   await tell(uid,`✅ Изменение проведено: ${out.targetId}, ${out.delta>0?'+':''}${out.delta}; баланс изменён на ${out.applied}, погашено долга ${out.debtRepaid}. Аудит сохранён.`,makeButtons([[button('⬅️ К балансам','a:credits')]]));
    try{await tell(out.targetId,`💳 Баланс SkinCar изменён администратором: ${out.delta>0?'+':''}${out.delta}. Проверить: /balance`);}catch{}
   }catch(e){return tell(uid,`Заявка недоступна: ${e.code||'ACTION_ERROR'}`);}
  }
