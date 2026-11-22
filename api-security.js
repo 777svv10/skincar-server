@@ -8,6 +8,7 @@ export function routeFamily(path=''){
  if(path==='/api/auth/telegram')return 'auth';
  if(path.startsWith('/api/vehicles'))return 'vehicles';
  if(path.startsWith('/api/generations'))return 'generations';
+ if(path.startsWith('/api/reports'))return 'reports';
  if(path.startsWith('/api/uploads'))return 'uploads';
  if(path.startsWith('/api/drafts'))return 'drafts';
  if(path.startsWith('/api/payments'))return 'payments';
@@ -25,6 +26,7 @@ export function hashActor(scope,actor){
 }
 export function ratePolicy(path,method){
  if(method==='POST'&&path==='/api/auth/telegram')return 'auth';
+ if(method==='POST'&&path==='/api/reports/start')return 'report';
  if(!['POST','PUT','PATCH','DELETE'].includes(method))return null;
  if(method==='POST'&&(path==='/api/vehicles'||/^\/api\/vehicles\/[a-f0-9-]+\/photos$/.test(path)))return 'upload';
  if(method==='POST'&&path==='/api/generations')return 'generation';
@@ -32,6 +34,7 @@ export function ratePolicy(path,method){
 }
 export const RATE_LIMITS=Object.freeze({
  auth:[[60,15],[3600,120]],
+ report:[[60,3],[3600,10]],
  upload:[[60,6],[3600,50]],
  generation:[[60,5],[3600,40]],
  mutation:[[60,120],[3600,1500]]

@@ -12,6 +12,7 @@ import {vehicleMetadata,vehicleView} from './vehicle-metadata.js';
 import {findSavedUpload} from './upload-status.js';
 import {createBotService,telegramMultipart} from './bot-service.js';
 import {newRequestId,routeFamily,traceEvent,ratePolicy,consumeApiLimit,allowAnonymousAuth,tooMany} from './api-security.js';
+import {startReport} from './report-intake.js';
 export function createHandler(db,config=process.env){
 const {BOT_TOKEN,WEBHOOK_SECRET}=config;
 const APP_URL=config.APP_URL||'https://skincar01.netlify.app/';
@@ -78,6 +79,11 @@ return async(req,res)=>{
     const user=rows[0];if(!user)return reply(res,401,{error:'Session expired'});
     const policy=ratePolicy(path,req.method);
     if(policy)await consumeApiLimit(db,policy,user.telegram_id);
+    if(path==='/api/reports/start'&&req.method==='POST'){
+      const payload=await body(req,2048);
+      const report=await startReport(db,user.telegram_id,payload,config.BOT_USERNAME||'skincartuning_bot');
+      return reply(res,201,{...report,requestId:res.skRequestId});
+    }
     if(path==='/api/wheels/availability'&&req.method==='GET')return reply(res,200,wheelAccess(config,user.telegram_id));
     if(path==='/api/films/availability'&&req.method==='GET')return reply(res,200,filmAccess(config,user.telegram_id));
     if(path==='/api/payments/catalog'&&req.method==='GET')return reply(res,200,catalog(user.telegram_id,config));

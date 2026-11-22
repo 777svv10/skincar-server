@@ -27,6 +27,7 @@ async function enableWebhook(){
    {command:'status',description:'Статус последних генераций'},
    {command:'faq',description:'Частые вопросы'},
    {command:'support',description:'Обращение в поддержку'},
+   {command:'report',description:'Сообщить о проблеме'},
    {command:'notifications',description:'Уведомления о готовности'}
   ]});}catch(e){console.error('Telegram command menu unavailable',e.code||e.name);}
  }catch(e){console.error('Telegram webhook unavailable; retry scheduled',e.code||e.name);}
@@ -54,6 +55,8 @@ const botHousekeeping=async()=>{
   await db.query("DELETE FROM bot_rate_limits WHERE window_start<now()-interval '2 days'");
   await db.query("DELETE FROM bot_support_state WHERE awaiting=false AND updated_at<now()-interval '30 days'");
   await db.query("DELETE FROM bot_admin_input_state WHERE updated_at<now()-interval '24 hours'");
+  await db.query("DELETE FROM bot_report_links WHERE expires_at<now()-interval '1 day'");
+  await db.query("UPDATE bot_ticket_diagnostics d SET screenshot_file_id=NULL,screenshot_kind=NULL WHERE d.screenshot_file_id IS NOT NULL AND d.ticket_id IN (SELECT id FROM bot_tickets WHERE status='closed' AND created_at<now()-interval '30 days')");
  }catch(e){console.error('Bot housekeeping failed',e.code||e.name);}
 };
 setInterval(botHousekeeping,6*3600000).unref();

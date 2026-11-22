@@ -225,3 +225,29 @@ CREATE TABLE IF NOT EXISTS bot_admin_input_state (
  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS bot_admin_input_state_cleanup ON bot_admin_input_state(updated_at);
+
+
+-- SK-111: one-time owner-bound handoff from an authenticated Mini App to Telegram support.
+CREATE TABLE IF NOT EXISTS bot_report_links (
+ token_hash TEXT PRIMARY KEY,
+ telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+ context JSONB NOT NULL DEFAULT '{}'::jsonb,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '10 minutes'),
+ consumed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS bot_report_links_expiration ON bot_report_links(expires_at);
+-- Keep screenshots in Telegram as file_id; never duplicate raw screenshot bytes in PostgreSQL.
+ALTER TABLE bot_support_state ADD COLUMN IF NOT EXISTS report_context JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE bot_support_state ADD COLUMN IF NOT EXISTS screenshot_file_id TEXT;
+ALTER TABLE bot_support_state ADD COLUMN IF NOT EXISTS screenshot_kind TEXT;
+ALTER TABLE bot_support_state ADD COLUMN IF NOT EXISTS pending_ticket_id UUID;
+ALTER TABLE bot_support_state ADD COLUMN IF NOT EXISTS screenshot_until TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS bot_ticket_diagnostics (
+ ticket_id UUID PRIMARY KEY REFERENCES bot_tickets(id) ON DELETE CASCADE,
+ report_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+ screenshot_file_id TEXT,
+ screenshot_kind TEXT CHECK (screenshot_kind IN ('photo','document')),
+ screenshot_attached_at TIMESTAMPTZ,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

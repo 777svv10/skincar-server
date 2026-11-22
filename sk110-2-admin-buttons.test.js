@@ -16,7 +16,7 @@ function harness(){
    if(q.includes('DELETE FROM bot_admin_input_state')&&q.includes('RETURNING')){const st=state.get(String(args[0]));if(st?.action!==args[1])return row([]);state.delete(String(args[0]));return row([st]);}
    if(q.includes('DELETE FROM bot_admin_input_state')){state.delete(String(args[0]));return row([]);}
    if(q.startsWith('SELECT id,telegram_id,subject,status FROM bot_tickets'))return row([{id:ticket,telegram_id:other,subject:'Фото не загрузилось',status:'open'}]);
-   if(q.startsWith('SELECT id,telegram_id,subject,status,created_at FROM bot_tickets'))return row([{id:ticket,telegram_id:other,subject:'Фото не загрузилось',status:'open',created_at:'2026-11-23T08:00:00Z'}]);
+   if(q.includes('FROM bot_tickets t LEFT JOIN bot_ticket_diagnostics d'))return row([{id:ticket,telegram_id:other,subject:'Фото не загрузилось',status:'open',created_at:'2026-11-23T08:00:00Z',report_context:{}}]);
    if(q.includes("SELECT id FROM bot_tickets WHERE id=$1 AND status"))return row([{id:ticket}]);
    if(q.includes('SELECT id,telegram_id FROM bot_tickets'))return row([{id:ticket,telegram_id:other}]);
    if(q.includes("UPDATE bot_tickets SET status='answered'")){replies++;return row([]);}
@@ -84,7 +84,7 @@ test('SK-110.2 credit button only stages action, never directly debits user',asy
 });
 test('SK-110.2 support tickets offer context buttons, reply input binds to ticket UUID',async()=>{
  const h=harness();await h.cb(a,'a:tickets');assert.match(buttons(last(h)),new RegExp(ticket));
- await h.cb(a,'a:ticket:'+ticket);assert.match(buttons(last(h)),/Ответить|Закрыть/);
+ await h.cb(a,'a:ticket:'+ticket);assert.match(buttons(last(h)),/Ответить|Решено/);
  await h.cb(a,'a:ticket:reply:'+ticket);assert.equal(h.state.get(String(a)).ticket_id,ticket);
  await h.msg(a,'Мы исправили ошибку, попробуйте ещё раз.');
  assert.equal(h.counts().replies,1);

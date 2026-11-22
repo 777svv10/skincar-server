@@ -4,6 +4,7 @@
 import {randomUUID} from 'node:crypto';
 import {stageCreditAction,confirmCreditAction,cancelCreditAction,issuePromo,redeemPromo,promoSummary} from './bot-admin-ops.js';
 import {loadGenerationAnalytics,analyticsText,periodFilter,periodLabel,loadGenerationExport,reportToCsv} from './image-analytics.js';
+import {consumeReport,diagnosticsText,screenshotInfo} from './report-intake.js';
 
 const PAGE_SIZE=6;
 const JOB_PAGE_SIZE=5;
@@ -124,6 +125,7 @@ function menuMarkup(lang,url,isAdmin=false,garageEnabled=true){const rows=[
  ...(garageEnabled?[[button(texts.garage(lang),'g:0'),webButton(texts.open(lang),url)]]:[[webButton(texts.open(lang),url)]]),
  [button(texts.balance(lang),'h'),button(texts.notif(lang),'n')],
  [button(texts.help(lang),'q'),button(texts.support(lang),'s')],
+ [button('🐞 '+tr(lang,'Сообщить о проблеме','Қате туралы хабарлау','Report a problem'),'sr')],
  [button('📜 Покупки','u'),button('⏳ Статус работ','z')]
  ];if(isAdmin)rows.push([button(texts.admin(lang),'a')]);return makeButtons(rows);
 }
@@ -280,19 +282,77 @@ export function createBotService({db,config,send,upload}){
  async function toggleNotifications(uid,lang,enabled){await db.query(`INSERT INTO bot_preferences(telegram_id,notify_ready) VALUES($1,$2) ON CONFLICT(telegram_id) DO UPDATE SET notify_ready=EXCLUDED.notify_ready,updated_at=now()`,[uid,enabled]);
   return showNotifications(uid,lang);
  }
- async function startSupport(uid,lang){await db.query(`INSERT INTO bot_support_state(telegram_id,awaiting) VALUES($1,true) ON CONFLICT(telegram_id) DO UPDATE SET awaiting=true,updated_at=now()`,[uid]);
-  return reply(uid,lang,tr(lang,'Напиши одним сообщением, что произошло, и мы зарегистрируем обращение. Не отправляй пароли, токены или данные карты. Для отмены — /cancel.','Мәселені бір хабарламамен жазыңыз. Құпиясөздер мен карта деректерін жібермеңіз. Болдырмау — /cancel.','Describe the issue in one message. Never send passwords, tokens or card details. /cancel to stop.'));
+ async function startSupport(uid,lang,context={}){
+  await db.query(`INSERT INTO bot_support_state(telegram_id,awaiting,report_context,screenshot_file_id,screenshot_kind,pending_ticket_id,screenshot_until)
+   VALUES($1,true,$2,NULL,NULL,NULL,NULL) ON CONFLICT(telegram_id) DO UPDATE SET
+   awaiting=true,report_context=EXCLUDED.report_context,screenshot_file_id=NULL,screenshot_kind=NULL,pending_ticket_id=NULL,screenshot_until=NULL,updated_at=now()`,[uid,JSON.stringify(context)]);
+  return reply(uid,lang,tr(lang,'🐞 Опиши проблему (от 5 до 1500 символов) и при желании прикрепи скриншот. Можно отправить скриншот первым, а затем текст. Не отправляй пароли, токены и данные карт. Для отмены — /cancel.','🐞 Мәселені сипаттап, қажет болса скриншот жіберіңіз. /cancel — тоқтату.','🐞 Describe the issue and optionally attach a screenshot. Screenshot first or description first works. /cancel to stop.'));
+ }
+ const ticketStatusLabel=status=>status==='closed'?'✅ Решено':status==='answered'?'🛠 В работе':'🆕 Новое';
+ async function notifyAdminsNewTicket(uid,id,body,reportContext,screenshot=null){
+  const metadata=diagnosticsText({report_context:reportContext,created_at:new Date()});
+  const summary=`🐞 Обращение ${id.slice(0,8)} · Новое\nПользователь: ${uid}\nОписание: ${slice(body,800)}\n\n${metadata}\n\n🔎 Для поиска ошибки: Request ID и время UTC в Railway. Автоматического чтения полных логов нет.`;
+  for(const adminId of admins){
+   try{
+    await tell(adminId,summary,makeButtons([[button('📨 Открыть заявку',`a:ticket:${id}`)]]));
+    if(screenshot)await send(screenshot.kind==='document'?'sendDocument':'sendPhoto',{
+     chat_id:adminId,[screenshot.kind==='document'?'document':'photo']:screenshot.fileId,
+     caption:`Скриншот обращения ${id.slice(0,8)}. Не пересылай посторонним.`});
+   }catch{/* Administrator delivery failures do not prevent registration. */}
+  }
  }
  async function supportMessage(uid,lang,body){
   if(body.length<5||body.length>1500)return reply(uid,lang,tr(lang,'Сообщение должно быть от 5 до 1500 символов.','Хабарлама 5–1500 таңба болуы керек.','Message must be 5–1500 characters.'));
-  const id=randomUUID();const inserted=await db.query(`INSERT INTO bot_tickets(id,telegram_id,subject,status) SELECT $1,$2,$3,'open' WHERE EXISTS (SELECT 1 FROM bot_support_state WHERE telegram_id=$2 AND awaiting=true) RETURNING id`,[id,uid,slice(body,1500)]);
-  if(!inserted.rows.length)return;
-  await db.query('UPDATE bot_support_state SET awaiting=false,updated_at=now() WHERE telegram_id=$1',[uid]);
-  await reply(uid,lang,tr(lang,`Обращение создано: ${id.slice(0,8)}. Ответ придёт сюда в чат.`,`Өтініш тіркелді: ${id.slice(0,8)}. Жауап осы чатқа келеді.`,`Ticket created: ${id.slice(0,8)}. We will reply here.`));
-  for(const adminId of admins){try{await tell(adminId,`✉️ Новый тикет ${id}\nПользователь: ${uid}\n${slice(body,1300)}`);}catch{ /* Don't expose contact details or fail the user ticket. */ }}
+  if(!await checkRate(db,uid,'support_ticket',5,3600))return reply(uid,lang,tr(lang,'Лимит новых обращений: 5 в час.','Сағатына 5 өтініштен аспаңыз.','Limit: 5 new tickets per hour.'));
+  const id=randomUUID();let screenshot=null,reportContext={};
+  // The claiming UPDATE and ticket creation run in one transaction. A webhook retry
+  // or two concurrent Telegram messages must never create duplicate tickets.
+  const connection=await db.connect();
+  try{
+   await connection.query('BEGIN');
+   const claimed=await connection.query(`SELECT report_context,screenshot_file_id,screenshot_kind
+    FROM bot_support_state WHERE telegram_id=$1 AND awaiting=true FOR UPDATE`,[uid]);
+   if(!claimed.rows.length){await connection.query('ROLLBACK');return;}
+   const context=claimed.rows[0];reportContext=context.report_context||{};
+   screenshot=context.screenshot_file_id&&context.screenshot_kind?
+    {fileId:context.screenshot_file_id,kind:context.screenshot_kind}:null;
+   await connection.query(`UPDATE bot_support_state SET awaiting=false,
+    report_context='{}'::jsonb,screenshot_file_id=NULL,screenshot_kind=NULL,
+    pending_ticket_id=$2,screenshot_until=now()+interval '10 minutes',updated_at=now()
+    WHERE telegram_id=$1`,[uid,id]);
+   await connection.query(`INSERT INTO bot_tickets(id,telegram_id,subject,status) VALUES($1,$2,$3,'open')`,[id,uid,slice(body,1500)]);
+   await connection.query(`INSERT INTO bot_ticket_diagnostics(ticket_id,report_context,screenshot_file_id,screenshot_kind,screenshot_attached_at)
+    VALUES($1,$2,$3,$4,CASE WHEN $3::text IS NOT NULL THEN now() ELSE NULL END)`,[id,JSON.stringify(reportContext),screenshot?.fileId||null,screenshot?.kind||null]);
+   await connection.query('COMMIT');
+  }catch(e){try{await connection.query('ROLLBACK');}catch{}throw e;}finally{connection.release();}
+  await reply(uid,lang,tr(lang,`✅ Обращение ${id.slice(0,8)} зарегистрировано. ${screenshot?'Скриншот приложен.':'Можешь отправить скриншот следующим сообщением в течение 10 минут.'} Ответ придёт в этот чат.`,`✅ Өтініш ${id.slice(0,8)} тіркелді. Жауап осы чатқа келеді.`,`✅ Ticket ${id.slice(0,8)} created. ${screenshot?'Screenshot attached.':'Send a screenshot in the next 10 minutes if helpful.'}`),makeButtons([[button('📨 Мои обращения','s:mine')],[button(texts.back(lang),'m')]]));
+  await notifyAdminsNewTicket(uid,id,body,reportContext,screenshot);
+ }
+ async function supportImage(uid,lang,m){
+  const file=screenshotInfo(m);
+  if(!file)return reply(uid,lang,tr(lang,'Нужен JPG или PNG до 10 МБ. Отправь как фото или файл.','10 МБ дейін JPG/PNG жіберіңіз.','Send a JPG/PNG up to 10 MB as a photo or document.'));
+  const row=(await db.query(`SELECT awaiting,pending_ticket_id FROM bot_support_state WHERE telegram_id=$1
+   AND (awaiting=true OR (pending_ticket_id IS NOT NULL AND screenshot_until>now()))`,[uid])).rows[0];
+  if(!row)return reply(uid,lang,'Сначала выбери «Сообщить о проблеме» или отправь /report.');
+  if(row.awaiting){
+   await db.query(`UPDATE bot_support_state SET screenshot_file_id=$2,screenshot_kind=$3,updated_at=now() WHERE telegram_id=$1 AND awaiting=true`,[uid,file.fileId,file.kind]);
+   if(typeof m.caption==='string'&&m.caption.trim().length>=5)return supportMessage(uid,lang,m.caption.slice(0,1500));
+   return reply(uid,lang,'📷 Скриншот получен. Теперь опиши проблему текстом, чтобы создать обращение.');
+  }
+  const id=row.pending_ticket_id;
+  const updated=await db.query(`UPDATE bot_ticket_diagnostics SET screenshot_file_id=$3,screenshot_kind=$4,screenshot_attached_at=now()
+   WHERE ticket_id=$1 AND screenshot_file_id IS NULL AND EXISTS
+   (SELECT 1 FROM bot_tickets WHERE id=$1 AND telegram_id=$2 AND status<>'closed') RETURNING ticket_id`,[id,uid,file.fileId,file.kind]);
+  if(!updated.rowCount)return reply(uid,lang,'Скриншот уже прикреплён либо обращение закрыто. Для новой ошибки начни /report.');
+  await db.query(`UPDATE bot_support_state SET pending_ticket_id=NULL,screenshot_until=NULL WHERE telegram_id=$1 AND pending_ticket_id=$2`,[uid,id]);
+  await reply(uid,lang,`📷 Скриншот прикреплён к обращению ${id.slice(0,8)}.`);
+  for(const adminId of admins){try{
+   await tell(adminId,`📷 Пользователь добавил скриншот к обращению ${id.slice(0,8)}.`,makeButtons([[button('📨 Открыть',`a:ticket:${id}`)]]));
+   await send(file.kind==='document'?'sendDocument':'sendPhoto',{chat_id:adminId,[file.kind==='document'?'document':'photo']:file.fileId,caption:`Обращение ${id.slice(0,8)}`});
+  }catch{}}
  }
  async function myTickets(uid,lang){const rows=(await db.query('SELECT id,status,created_at FROM bot_tickets WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 8',[uid])).rows;
-  return reply(uid,lang,rows.length?rows.map(x=>`${x.id.slice(0,8)} · ${x.status}`).join('\n'):tr(lang,'Обращений пока нет.','Әзірге өтініштер жоқ.','No tickets yet.'));
+  return reply(uid,lang,rows.length?rows.map(x=>`${x.id.slice(0,8)} · ${ticketStatusLabel(x.status)}`).join('\n'):tr(lang,'Обращений пока нет.','Әзірге өтініштер жоқ.','No tickets yet.'));
  }
  const periodsMenu=(type,range)=>makeButtons([
   [button('24 ч',`a:${type}_today`),button('7 д',`a:${type}_week`),button('30 д',`a:${type}_month`)],
@@ -457,19 +517,22 @@ export function createBotService({db,config,send,upload}){
  async function adminTickets(uid){
   const rows=(await db.query(`SELECT id,telegram_id,subject,status FROM bot_tickets
    WHERE status IN ('open','answered') ORDER BY created_at DESC LIMIT 10`)).rows;
-  const nav=rows.map((r,i)=>[button(`📩 ${i+1}. ${slice(r.subject,28)} · ${r.status==='answered'?'ответили':'новое'}`,`a:ticket:${r.id}`)]);
+  const nav=rows.map((r,i)=>[button(`📩 ${i+1}. ${slice(r.subject,28)} · ${ticketStatusLabel(r.status)}`,`a:ticket:${r.id}`)]);
   nav.push([button('🔄 Обновить','a:tickets')],[button('⬅️ Поддержка','a:support')]);
   return tell(uid,rows.length?`📨 Обращения · ${rows.length} последних\n\nВыбери заявку, чтобы ответить или закрыть.`:'📨 Сейчас нет открытых обращений.',makeButtons(nav));
  }
  async function adminTicket(uid,id){
   if(!isUuid(id))return tell(uid,'Некорректный идентификатор обращения.');
-  const row=(await db.query('SELECT id,telegram_id,subject,status,created_at FROM bot_tickets WHERE id=$1',[id])).rows[0];
+  const row=(await db.query(`SELECT t.id,t.telegram_id,t.subject,t.status,t.created_at,d.report_context,
+   d.screenshot_file_id,d.screenshot_kind FROM bot_tickets t LEFT JOIN bot_ticket_diagnostics d ON d.ticket_id=t.id WHERE t.id=$1`,[id])).rows[0];
   if(!row)return tell(uid,'Обращение не найдено.',makeButtons([[button('⬅️ Обращения','a:tickets')]]));
   const actions=row.status==='closed'?[]:[
-   [button('✉️ Ответить','a:ticket:reply:'+id)],
-   [button('✅ Закрыть обращение','a:ticket:close:'+id)]
+   ...(row.status==='open'?[[button('🛠 В работу',`a:ticket:progress:${id}`)]]:[]),
+   [button('✉️ Ответить',`a:ticket:reply:${id}`)],
+   [button('✅ Решено',`a:ticket:close:${id}`)]
   ];
-  return tell(uid,`📨 Обращение ${id.slice(0,8)}\nСтатус: ${row.status}\nПользователь: ${row.telegram_id}\nСоздано: ${new Date(row.created_at).toISOString()}\n\n${slice(row.subject,1000)}`,
+  if(row.screenshot_file_id)actions.push([button('📷 Скриншот',`a:ticket:photo:${id}`)]);
+  return tell(uid,`📨 Обращение ${id.slice(0,8)}\nСтатус: ${ticketStatusLabel(row.status)}\nПользователь: ${row.telegram_id}\nСоздано: ${new Date(row.created_at).toISOString()}\n\n${slice(row.subject,850)}\n\n🧩 Диагностика:\n${diagnosticsText(row)}\n\nЖурнал Railway: поиск по Request ID и времени UTC. Причина ошибки ещё не подтверждена.`,
    makeButtons([...actions,[button('⬅️ Обращения','a:tickets')]]));
  }
  async function adminClose(uid,arg){
@@ -495,7 +558,8 @@ export function createBotService({db,config,send,upload}){
   if(data==='u')return purchases(uid,lang);
   if(data==='z')return jobStatus(uid,lang);
   if(data==='q')return reply(uid,lang,texts.help(lang),faqMenu(lang));
-  if(data==='s')return startSupport(uid,lang);
+  if(data==='s'||data==='sr')return startSupport(uid,lang);
+  if(data==='s:mine')return myTickets(uid,lang);
   if(data==='n')return showNotifications(uid,lang);
   if(data==='a'&&isAdmin(uid))return adminMenu(uid);
   if(data?.startsWith('a:')&&!isAdmin(uid))return reply(uid,lang,texts.cant(lang));
@@ -520,6 +584,19 @@ export function createBotService({db,config,send,upload}){
   if(/^a:input:(credit|debit|promo)$/.test(data))return adminStartInput(uid,data.split(':')[2]);
   if(data==='a:input:cancel'){await clearAdminInput(uid);return adminMenu(uid);}
   if(data==='a:promo:confirm')return adminPromoConfirm(uid);
+  const screenshotMatch=/^a:ticket:photo:([a-f0-9-]{36})$/i.exec(data);
+  if(screenshotMatch&&isUuid(screenshotMatch[1])){
+   const d=(await db.query('SELECT screenshot_file_id,screenshot_kind FROM bot_ticket_diagnostics WHERE ticket_id=$1',[screenshotMatch[1]])).rows[0];
+   if(!d?.screenshot_file_id)return tell(uid,'Скриншот отсутствует.');
+   return send(d.screenshot_kind==='document'?'sendDocument':'sendPhoto',{
+    chat_id:uid,[d.screenshot_kind==='document'?'document':'photo']:d.screenshot_file_id,
+    caption:`Обращение ${screenshotMatch[1].slice(0,8)} · закрытые данные поддержки`});
+  }
+  const progressMatch=/^a:ticket:progress:([a-f0-9-]{36})$/i.exec(data);
+  if(progressMatch&&isUuid(progressMatch[1])){
+   await db.query("UPDATE bot_tickets SET status='answered' WHERE id=$1 AND status='open'",[progressMatch[1]]);
+   return adminTicket(uid,progressMatch[1]);
+  }
   const ticketMatch=/^a:ticket:([a-f0-9-]{36})$/i.exec(data);
   if(ticketMatch&&isUuid(ticketMatch[1]))return adminTicket(uid,ticketMatch[1]);
   const ticketReply=/^a:ticket:reply:([a-f0-9-]{36})$/i.exec(data);
@@ -557,6 +634,12 @@ export function createBotService({db,config,send,upload}){
  async function message(uid,lang,text){
   const parsed=/^\/([a-z_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(text||'');
   const cmd=parsed?.[1]?.toLowerCase(),arg=parsed?.[2]||'';
+  if(cmd==='start'&&/^report_[a-f0-9]{36}$/.test(arg)){
+   const context=await consumeReport(db,uid,arg.slice(7));
+   if(!context)return reply(uid,lang,'Ссылка обращения недействительна или срок истёк. Открой SkinCar → Поддержка → «Сообщить о проблеме» ещё раз.');
+   return startSupport(uid,lang,context);
+  }
+  if(cmd==='start'&&arg==='report')return startSupport(uid,lang);
   if(cmd==='start')return replyMenu(uid,lang);
   if(cmd==='menu'||normalizeText(text)===normalizeText(texts.menu(lang))||normalizeText(text)==='меню'||normalizeText(text)==='menu'||normalizeText(text)==='мәзір')return showInlineMenu(uid,lang);
   if(cmd==='garage')return garage(uid,lang);
@@ -568,11 +651,11 @@ export function createBotService({db,config,send,upload}){
    if(hits.length)return reply(uid,lang,hits.map(i=>localizedFaq(lang,i)).join('\n\n'),faqMenu(lang));
    return reply(uid,lang,texts.help(lang),faqMenu(lang));
   }
-  if(cmd==='support'||cmd==='paysupport')return startSupport(uid,lang);
+  if(cmd==='support'||cmd==='paysupport'||cmd==='report')return startSupport(uid,lang);
   if(cmd==='mytickets')return myTickets(uid,lang);
   if(cmd==='notifications')return showNotifications(uid,lang);
   if(cmd==='promo')return userPromo(uid,lang,arg);
-  if(cmd==='cancel'){await db.query('UPDATE bot_support_state SET awaiting=false WHERE telegram_id=$1',[uid]);return replyMenu(uid,lang);}
+  if(cmd==='cancel'){await db.query("UPDATE bot_support_state SET awaiting=false,report_context='{}'::jsonb,screenshot_file_id=NULL,screenshot_kind=NULL,pending_ticket_id=NULL,screenshot_until=NULL WHERE telegram_id=$1",[uid]);return replyMenu(uid,lang);}
   if(isAdmin(uid)){
    if(cmd==='admin')return adminMenu(uid);
    if(cmd==='stats')return adminStats(uid,'today');
@@ -616,6 +699,7 @@ export function createBotService({db,config,send,upload}){
    try{await send('answerCallbackQuery',{callback_query_id:cb.id,cache_time:0});}catch{}
    try{return await callback(uid,lang,cb.data);}catch(err){console.error('Bot callback:',err.code||err.name);return reply(uid,lang,texts.mediaFail(lang));}
   }
+  if(m?.photo?.length||m?.document)return supportImage(uid,lang,m);
   if(typeof m?.text==='string')return message(uid,lang,m.text.slice(0,2000));
  };
 }
