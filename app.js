@@ -10,6 +10,7 @@ import {normalizeNickname,claimNickname,nicknameQuota} from './nickname.js';
 import {listDrafts,saveDraft,deleteDraft} from './drafts.js';
 import {vehicleMetadata,vehicleView} from './vehicle-metadata.js';
 import {findSavedUpload} from './upload-status.js';
+import {createBotService,telegramMultipart} from './bot-service.js';
 export function createHandler(db,config=process.env){
 const {BOT_TOKEN,WEBHOOK_SECRET}=config;
 const APP_URL=config.APP_URL||'https://skincar01.netlify.app/';
@@ -18,6 +19,7 @@ const digest=s=>createHash('sha256').update(s).digest('hex');
 const reply=(res,status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data))};
 async function body(req,limit=32768){let size=0,parts=[];for await(const chunk of req){size+=chunk.length;if(size>limit)throw Object.assign(Error('Body too large'),{status:413,code:'BODY_TOO_LARGE'});parts.push(chunk)}try{const value=JSON.parse(Buffer.concat(parts).toString()||'{}');if(!value||typeof value!=='object'||Array.isArray(value))throw Error();return value;}catch{throw Object.assign(Error('Invalid JSON'),{status:400,code:'INVALID_JSON'})}}
 async function telegram(method,data){const r=await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),signal:AbortSignal.timeout(10000)});const json=await r.json();if(!json.ok)throw Error('Telegram request failed');return json.result}
+const botService=createBotService({db,config,send:telegram,upload:(method,data)=>telegramMultipart(BOT_TOKEN,method,data)});
 const view=u=>({id:u.telegram_id,displayName:u.display_name,lang:u.lang,theme:u.theme,balance:u.balance,nickname:u.nickname,nicknameRequired:!u.nickname,suggestedNickname:normalizeNickname(u.telegram_username)});
 return async(req,res)=>{
   const path=new URL(req.url,'http://localhost').pathname;
@@ -33,10 +35,17 @@ return async(req,res)=>{
       const update=await body(req),m=update.message;
       if(update.pre_checkout_query){const q=update.pre_checkout_query;const ok=await checkCheckout(db,q,config);await telegram('answerPreCheckoutQuery',{pre_checkout_query_id:q.id,ok,...(!ok?{error_message:'Счёт недоступен. Открой SkinCar и создай новый.'}:{})});}
       if(m?.successful_payment)await settlePayment(db,m.from.id,m.successful_payment);
-      if(m?.refunded_payment){const recipient=m.chat?.type==='private'?m.chat.id:m.from?.id;await settlePayment(db,recipient,m.refunded_payment);await applyRefund(db,recipient,m.refunded_payment);}
-      if(m?.chat?.type==='private'&&/^\/(paysupport|support)(?:@skincartuning_bot)?(?:\s|$)/i.test(m.text||''))await telegram('sendMessage',{chat_id:m.chat.id,text:'Поддержка платежей SkinCar: @vladisimonn. Отправь номер заказа из истории покупок и опиши проблему. Не отправляй пароли или данные карты.'});
-
-      if(m?.chat?.type==='private'&&/^\/start(?:@skincartuning_bot)?(?:\s|$)/i.test(m.text||''))await telegram('sendMessage',{chat_id:m.chat.id,text:'Добро пожаловать в SkinCar — твоё тюнинг-ателье. Открой приложение, чтобы собрать образ автомобиля.',reply_markup:{inline_keyboard:[[{text:'Открыть SkinCar',web_app:{url:APP_URL}}]]}});
+      if(m?.refunded_payment){const recipient=m.chat?.type==='private'?m.chat.id:m.from?.id;await applyRefund(db,recipient,m.refunded_payment);}
+      // SK-106: repeated Telegram callback delivery cannot send the same document twice.
+      // An interrupted action can be retried by pressing a button again (new callback ID).
+      let botCallbackFirst=true;
+      if(update.callback_query){
+        const qid=String(update.callback_query.id||'');
+        if(qid.length<1||qid.length>128)botCallbackFirst=false;
+        else{const receipt=await db.query(`INSERT INTO bot_callback_receipts(query_id) VALUES($1) ON CONFLICT DO NOTHING RETURNING query_id`,[qid]);botCallbackFirst=!!receipt.rowCount;}
+      }
+      // User commands, private garage and admin controls; Stars handlers above remain intact.
+      if(botCallbackFirst&&(update.callback_query||m))await botService(update);
       return reply(res,200,{ok:true});
     }
     if(path==='/api/auth/telegram'&&req.method==='POST'){

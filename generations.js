@@ -1,3 +1,4 @@
+import {queueReadyNotification} from './bot-service.js';
 import {randomUUID,createHash} from 'node:crypto';
 import sharp from 'sharp';
 import {isWheelSku,authorizeWheelSku,loadWheelReference} from './wheel-library.js';
@@ -244,6 +245,8 @@ export async function workOnce(db,edit=editWithOpenAI){
  const token=randomUUID();
  const job=await transaction(db,async c=>(await c.query(`UPDATE generations SET status='processing',started_at=now(),worker_token=$1 WHERE id=(SELECT id FROM generations WHERE status='queued' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`,[token])).rows[0]);
  if(!job)return;
- try{const out=await edit(job);const completed=await db.query("UPDATE generations SET status='done',result_image=$3,thumbnail=$4,usage=$5,finished_at=now() WHERE id=$1 AND worker_token=$2 AND status='processing' RETURNING id",[job.id,token,out.result,out.thumbnail,JSON.stringify(out.usage)]);if(completed.rowCount&&job.options?.draftId){try{await db.query('DELETE FROM drafts WHERE id=$1 AND telegram_id=$2',[job.options.draftId,job.telegram_id]);}catch(e){console.error('Completed generation draft cleanup failed:',e.code||e.name);}}console.log('Generation completed:',job.id);}catch(e){console.error('Generation failed:',job.id,e.code||e.name);await failJob(db,job.id,e.status?e.code:'GENERATION_FAILED',token);}
+ try{const out=await edit(job);const completed=await db.query("UPDATE generations SET status='done',result_image=$3,thumbnail=$4,usage=$5,finished_at=now() WHERE id=$1 AND worker_token=$2 AND status='processing' RETURNING id",[job.id,token,out.result,out.thumbnail,JSON.stringify(out.usage)]);if(completed.rowCount&&job.options?.draftId){try{await db.query('DELETE FROM drafts WHERE id=$1 AND telegram_id=$2',[job.options.draftId,job.telegram_id]);}catch(e){console.error('Completed generation draft cleanup failed:',e.code||e.name);}}
+ if(completed.rowCount){try{await queueReadyNotification(db,job.id,job.telegram_id);}catch(e){console.error('Bot ready notice queue:',e.code||e.name);}}
+ console.log('Generation completed:',job.id);}catch(e){console.error('Generation failed:',job.id,e.code||e.name);await failJob(db,job.id,e.status?e.code:'GENERATION_FAILED',token);}
 }
 export function startWorker(db){let running=false;const tick=async()=>{if(running)return;running=true;try{await workOnce(db);}catch(e){console.error('Worker failure:',e.code||e.name);}finally{running=false;}};const timer=setInterval(tick,3000);timer.unref();tick();return ()=>clearInterval(timer);}

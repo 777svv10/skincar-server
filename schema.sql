@@ -125,3 +125,82 @@ CREATE TABLE IF NOT EXISTS vehicle_photos (
  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS vehicle_photos_owner ON vehicle_photos(telegram_id,vehicle_id,created_at DESC);
+
+-- SK-106: private Telegram bot support, preferences, flood control and opt-in notices.
+-- Additive only; no existing images, users, balances or orders are modified.
+CREATE TABLE IF NOT EXISTS bot_preferences (
+ telegram_id BIGINT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+ notify_ready BOOLEAN NOT NULL DEFAULT false,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS bot_rate_limits (
+ telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+ scope TEXT NOT NULL,
+ window_start TIMESTAMPTZ NOT NULL DEFAULT now(),
+ hits INTEGER NOT NULL DEFAULT 1,
+ PRIMARY KEY(telegram_id,scope)
+);
+CREATE TABLE IF NOT EXISTS bot_support_state (
+ telegram_id BIGINT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
+ awaiting BOOLEAN NOT NULL DEFAULT false,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS bot_tickets (
+ id UUID PRIMARY KEY,
+ telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+ subject TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','answered','closed')),
+ answer TEXT,
+ admin_id BIGINT,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ answered_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS bot_tickets_open ON bot_tickets(status,created_at DESC);
+CREATE TABLE IF NOT EXISTS bot_notification_outbox (
+ generation_id UUID PRIMARY KEY REFERENCES generations(id) ON DELETE CASCADE,
+ telegram_id BIGINT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+ attempts INTEGER NOT NULL DEFAULT 0,
+ next_try_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ sent_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS bot_notifications_pending ON bot_notification_outbox(next_try_at) WHERE sent_at IS NULL;
+
+-- SK-106: audited, two-step administrator credit adjustments.
+CREATE TABLE IF NOT EXISTS bot_admin_credit_actions (
+ id UUID PRIMARY KEY,
+ admin_id BIGINT NOT NULL,
+ target_id BIGINT NOT NULL REFERENCES users(telegram_id),
+ delta INTEGER NOT NULL CHECK(delta BETWEEN -100 AND 100 AND delta <> 0),
+ reason TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN('pending','cancelled','applied')),
+ applied_delta INTEGER,
+ debt_repaid INTEGER,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ confirmed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS bot_admin_credit_audit ON bot_admin_credit_actions(admin_id,created_at DESC);
+-- Expiring one-time-per-user promo codes; the plaintext code is shown only once at issuance.
+CREATE TABLE IF NOT EXISTS bot_promo_codes (
+ code_hash TEXT PRIMARY KEY,
+ credits INTEGER NOT NULL CHECK(credits BETWEEN 1 AND 20),
+ max_uses INTEGER NOT NULL CHECK(max_uses BETWEEN 1 AND 100),
+ uses INTEGER NOT NULL DEFAULT 0 CHECK(uses>=0),
+ active BOOLEAN NOT NULL DEFAULT true,
+ expires_at TIMESTAMPTZ NOT NULL,
+ created_by BIGINT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS bot_promo_redemptions (
+ code_hash TEXT NOT NULL REFERENCES bot_promo_codes(code_hash),
+ telegram_id BIGINT NOT NULL REFERENCES users(telegram_id),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ PRIMARY KEY(code_hash,telegram_id)
+);
+
+-- Idempotent Telegram callback processing, separate from Stars receipt idempotency.
+CREATE TABLE IF NOT EXISTS bot_callback_receipts (
+ query_id TEXT PRIMARY KEY,
+ received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS bot_callback_receipts_expiry ON bot_callback_receipts(received_at);
