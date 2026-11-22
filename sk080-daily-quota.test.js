@@ -8,17 +8,17 @@ assert(start>=0&&stop>start,'Quota helper is missing');
 const exported=file.slice(start,stop).replace('export ','');
 const isDailyLimitExempt=Function('process',exported+';return isDailyLimitExempt')({env:{}});
 test('exempt the precisely configured tester only',()=>{
- assert.equal(isDailyLimitExempt(306179287,'306179287'),true);
- assert.equal(isDailyLimitExempt('306179287','306179287'),true);
- assert.equal(isDailyLimitExempt(306179288,'306179287'),false);
- assert.equal(isDailyLimitExempt(30617928,'306179287'),false);
+ assert.equal(isDailyLimitExempt(123456789,'123456789'),true);
+ assert.equal(isDailyLimitExempt('123456789','123456789'),true);
+ assert.equal(isDailyLimitExempt(123456790,'123456789'),false);
+ assert.equal(isDailyLimitExempt(12345678,'123456789'),false);
 });
 test('allowlist supports whitespace and comma-separated IDs but no substring matching',()=>{
- assert.equal(isDailyLimitExempt(306179287,' 100, 306179287 , 300'),true);
- assert.equal(isDailyLimitExempt(30617928,' 306179287, 100'),false);
- assert.equal(isDailyLimitExempt(306179287,'*'),false);
- assert.equal(isDailyLimitExempt(306179287,''),false);
- assert.equal(isDailyLimitExempt(306179287,'0306179287'),false);
+ assert.equal(isDailyLimitExempt(123456789,' 100, 123456789 , 300'),true);
+ assert.equal(isDailyLimitExempt(12345678,' 123456789, 100'),false);
+ assert.equal(isDailyLimitExempt(123456789,'*'),false);
+ assert.equal(isDailyLimitExempt(123456789,''),false);
+ assert.equal(isDailyLimitExempt(123456789,'0123456789'),false);
 });
 test('only the daily limiter is bypassed, not the other safety limits',()=>{
  assert.match(file,/if\(Number\(counts\.daily\)>=10&&!isDailyLimitExempt\(userId\)\)throw problem\(429,'DAILY_LIMIT'\)/);
