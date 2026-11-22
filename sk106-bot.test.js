@@ -51,10 +51,16 @@ test('SK-106 ignores group and chat/from ID mismatch before any database activit
  const h=harness();await h.handle(cb(`w:${job}:f`,u,999));
  assert.equal(h.out.length,0);assert.equal(h.media.length,0);assert.equal(h.queries.length,0);
 });
-test('SK-106 /start adds menu with garage, settings and web_app; no admin for visitor',async()=>{
+test('SK-107 /start adds two persistent actions and /menu opens inline bot sections',async()=>{
  const h=harness();await h.handle(msg('/start'));
  const out=h.out.find(x=>x.method==='sendMessage');assert.match(out.data.text,/SkinCar/);
- const kb=JSON.stringify(out.data.reply_markup);assert.match(kb,/Мой гараж/);assert.match(kb,/web_app/);assert.doesNotMatch(kb,/Админка/);
+ assert.equal(out.data.reply_markup.keyboard[0].length,2);
+ assert.equal(out.data.reply_markup.is_persistent,true);
+ assert.deepEqual(out.data.reply_markup.keyboard[0].map(x=>x.text),['↗️ Открыть SkinCar','☰ Меню']);
+ assert.match(out.data.reply_markup.keyboard[0][0].web_app.url,/netlify/);
+ await h.handle(msg('☰ Меню'));
+ const kb=JSON.stringify(h.out.at(-1).data.reply_markup);
+ assert.match(kb,/Мой гараж/);assert.doesNotMatch(kb,/Админка/);
 });
 test('SK-106 garage lists only user cars via owner parameter',async()=>{
  const h=harness();await h.handle(cb('g:0'));
@@ -91,7 +97,7 @@ test('SK-106 preview does not call file download, uses sendPhoto',async()=>{
  const h=harness();await h.handle(cb(`w:${job}:p`));assert.equal(h.media[0].method,'sendPhoto');
 });
 test('SK-106 admin commands deny non-admin even when guessing /stats',async()=>{
- const h=harness();await h.handle(msg('/stats'));assert(h.out.some(x=>/главное меню/.test(x.data.text||'')));
+ const h=harness();await h.handle(msg('/stats'));assert(h.out.some(x=>/SkinCar/.test(x.data.text||'')));
  assert(!h.queries.some(x=>x.sql.includes('FROM generations WHERE created_at')));
 });
 test('SK-106 FAQ searches by real words',()=>{

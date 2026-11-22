@@ -20,9 +20,11 @@ async function enableWebhook(){
   console.log('Telegram bot webhook ready; Stars mode:',appConfig.PAYMENTS_MODE);
   // Commands are convenience only; failures never disable payments or bot.
   try{await telegramCall(BOT_TOKEN,'setMyCommands',{commands:[
-   {command:'start',description:'Главное меню SkinCar'},
+   {command:'start',description:'Две кнопки: приложение и меню'},
+   {command:'menu',description:'Разделы Telegram-бота'},
    {command:'garage',description:'Мой гараж и готовые образы'},
    {command:'balance',description:'Баланс генераций'},
+   {command:'status',description:'Статус последних генераций'},
    {command:'faq',description:'Частые вопросы'},
    {command:'support',description:'Обращение в поддержку'},
    {command:'notifications',description:'Уведомления о готовности'}

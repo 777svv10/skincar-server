@@ -29,6 +29,7 @@ const texts={
  file:l=>tr(l,'📥 Скачать файлом','📥 Файлды жүктеу','📥 Download file'),
  compare:l=>tr(l,'🔀 До / После','🔀 Дейін / Кейін','🔀 Before / After'),
  open:l=>tr(l,'↗️ Открыть SkinCar','↗️ SkinCar ашу','↗️ Open SkinCar'),
+ menu:l=>tr(l,'☰ Меню','☰ Мәзір','☰ Menu'),
  back:l=>tr(l,'⬅️ Назад','⬅️ Артқа','⬅️ Back'),
  next:l=>tr(l,'Дальше ➡️','Келесі ➡️','Next ➡️'),
  balance:l=>tr(l,'💳 Мои генерации','💳 Менің генерацияларым','💳 My credits'),
@@ -84,6 +85,40 @@ function normalizeText(text){return slice(text,1000).toLocaleLowerCase('ru').rep
 export function searchFaq(q){const words=normalizeText(q).split(/\s+/).filter(w=>w.length>2);if(!words.length)return [];
  return FAQ.map((item,i)=>({i,score:words.reduce((s,w)=>s+([item.q,...item.a].flat().some(t=>normalizeText(t).includes(w))?1:0),0)})).filter(x=>x.score).sort((a,b)=>b.score-a.score).slice(0,3).map(x=>x.i);
 }
+
+/* SK-107: Telegram supports only one native chat menu button. Two persistent
+reply-keyboard actions keep both Mini App and bot menu visible in private chats. */
+export function botPersistentKeyboard(lang,url){
+ return {keyboard:[[ {text:texts.open(lang),web_app:{url}}, {text:texts.menu(lang)} ]],
+ resize_keyboard:true,is_persistent:true,one_time_keyboard:false,
+ input_field_placeholder:tr(lang,'Открыть приложение или меню','Қолданбаны немесе мәзірді ашу','Open app or menu')};
+}
+export function botStatusSummary(lang,rows){
+ const recent=Array.isArray(rows)?rows.slice(0,8):[];
+ if(!recent.length)return tr(lang,'Генераций пока нет.','Әзірге генерациялар жоқ.','No generations yet.');
+ const names={queued:tr(lang,'В очереди','Кезекте','Queued'),processing:tr(lang,'Обрабатывается','Өңделуде','Processing'),done:tr(lang,'Готово','Дайын','Ready'),failed:tr(lang,'Ошибка','Қате','Failed')};
+ const count={done:0,queued:0,processing:0,failed:0};
+ for(const j of recent){if(Object.hasOwn(count,j.status))count[j.status]++;}
+ const title=tr(lang,'📋 Статус работ · последние '+recent.length+' запросов','📋 Жұмыстар күйі · соңғы '+recent.length+' сұрау','📋 Job status · last '+recent.length+' requests');
+ const summary=tr(lang,'✅ Готово: '+count.done+'   ⏳ В работе: '+(count.queued+count.processing)+'   ❌ Ошибки: '+count.failed,
+ '✅ Дайын: '+count.done+'   ⏳ Өңделуде: '+(count.queued+count.processing)+'   ❌ Қателер: '+count.failed,
+ '✅ Ready: '+count.done+'   ⏳ In progress: '+(count.queued+count.processing)+'   ❌ Failed: '+count.failed);
+ const items=recent.slice(0,5).map((j,i)=>{
+  const label=slice([j.vehicle_make,j.vehicle_model,j.vehicle_generation].filter(Boolean).join(' ')||j.vehicle_name||tr(lang,'Автомобиль недоступен','Көлік қолжетімсіз','Vehicle unavailable'),44);
+  const mode=j.options?.qualityMode==='hd'?'HD':j.options?.qualityMode==='standard'?tr(lang,'Стандарт','Стандарт','Standard'):'—';
+  const stat=names[j.status]||slice(j.status,24)||'—';
+  let when='';
+  if(j.created_at){
+   const d=new Date(j.created_at);
+   if(!Number.isNaN(d.getTime())){
+    when=' · '+new Intl.DateTimeFormat('ru-RU',{timeZone:'Asia/Qostanay',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(d)+' '+tr(lang,'КЗ','ҚЗ','KZ');
+   }
+  }
+  return (i+1)+'. '+label+' — '+stat+' · '+mode+when;
+ }).join('\n');
+ return title+'\n'+summary+'\n\n'+tr(lang,'Последние результаты:','Соңғы нәтижелер:','Recent results:')+'\n'+items;
+}
+
 function menuMarkup(lang,url,isAdmin=false,garageEnabled=true){const rows=[
  ...(garageEnabled?[[button(texts.garage(lang),'g:0'),webButton(texts.open(lang),url)]]:[[webButton(texts.open(lang),url)]]),
  [button(texts.balance(lang),'h'),button(texts.notif(lang),'n')],
@@ -114,7 +149,11 @@ export function createBotService({db,config,send,upload}){
  const tell=(id,text,reply_markup)=>send('sendMessage',{chat_id:id,text,...(reply_markup?{reply_markup}:{})});
  const reply=(id,lang,text,markup)=>tell(id,text,markup);
  const guarded=async(uid,lang,scope,limit,secs)=>{if(await checkRate(db,uid,scope,limit,secs))return true;await reply(uid,lang,texts.busy(lang));return false;};
- const replyMenu=(uid,lang)=>reply(uid,lang,texts.home(lang),menuMarkup(lang,appUrl,isAdmin(uid),garageEnabled));
+ const replyMenu=(uid,lang)=>reply(uid,lang,tr(lang,
+ 'SkinCar · выбери действие ниже: «Открыть SkinCar» или «Меню».',
+ 'SkinCar · «SkinCar ашу» немесе «Мәзір» түймесін таңдаңыз.',
+ 'SkinCar · choose "Open SkinCar" or "Menu" below.'),botPersistentKeyboard(lang,appUrl));
+ const showInlineMenu=(uid,lang)=>reply(uid,lang,texts.home(lang),menuMarkup(lang,appUrl,isAdmin(uid),garageEnabled));
  const oneOwnerVehicle=async(uid,vehicleId)=> (await db.query('SELECT id,name,make,model,generation,nickname FROM vehicles WHERE id=$1 AND telegram_id=$2',[vehicleId,uid])).rows[0];
  const vehicleLabel=v=>slice([v.make,v.model,v.generation].filter(Boolean).join(' ')||v.name||'Автомобиль',70);
  async function garage(uid,lang,page=0){
@@ -218,11 +257,10 @@ export function createBotService({db,config,send,upload}){
   return reply(uid,lang,msg,makeButtons([[button(texts.back(lang),'m')]]));
  }
  async function jobStatus(uid,lang){
-  const list=(await db.query(`SELECT status,created_at,options FROM generations WHERE telegram_id=$1 AND NOT archived
-   ORDER BY created_at DESC LIMIT 8`,[uid])).rows;
-  const names={queued:'⏳ В очереди',processing:'⏳ Обрабатывается',done:'✅ Готово',failed:'❌ Ошибка'};
-  return reply(uid,lang,list.length?list.map(x=>`${names[x.status]||x.status} · ${x.options?.qualityMode==='hd'?'HD':'Стандарт'}`).join('\n')
-   :tr(lang,'Генераций пока нет.','Генерациялар жоқ.','No generations yet.'),makeButtons([[button(texts.garage(lang),'g:0')],[button(texts.back(lang),'m')]]));
+  const rows=(await db.query("SELECT g.id,g.status,g.created_at,g.options,v.name AS vehicle_name,v.make AS vehicle_make,v.model AS vehicle_model,v.generation AS vehicle_generation,v.id AS vehicle_id FROM generations g LEFT JOIN vehicles v ON v.id::text=g.options->>'vehicleId' AND v.telegram_id=g.telegram_id WHERE g.telegram_id=$1 AND NOT g.archived ORDER BY g.created_at DESC LIMIT 8",[uid])).rows;
+  const previews=rows.filter(j=>j.status==='done'&&j.vehicle_id&&isUuid(j.id)).slice(0,3)
+    .map(j=>[button('👁 '+slice([j.vehicle_make,j.vehicle_model].filter(Boolean).join(' ')||j.vehicle_name||'Образ',32),'w:'+j.id+':p')]);
+  return reply(uid,lang,botStatusSummary(lang,rows),makeButtons([...previews,[button(texts.garage(lang),'g:0')],[button(texts.back(lang),'m')]]));
  }
  async function showNotifications(uid,lang){const p=(await db.query('SELECT notify_ready FROM bot_preferences WHERE telegram_id=$1',[uid])).rows[0];const on=!!p?.notify_ready;
   return reply(uid,lang,`${texts.notif(lang)}\n${on?tr(lang,'Включены','Қосулы','Enabled'):tr(lang,'Выключены','Өшірулі','Disabled')}\n${tr(lang,'Сообщения о готовой генерации только по согласию.','Дайын бейне туралы хабарламалар тек келісіммен.','Ready notifications are opt-in only.')}`,makeButtons([[button(on?'🔕 Выключить':'🔔 Включить',`n:${on?'off':'on'}`)],[button(texts.back(lang),'m')]]));
@@ -320,7 +358,7 @@ export function createBotService({db,config,send,upload}){
  }
  async function adminMenu(uid){return tell(uid,'🔒 Администрация SkinCar\n/stats, /stats_week, /stats_month, /models, /last, /cost, /limits\n/tickets, /reply ID текст, /close ID\n/credit ID число причина, /debit ID число причина\n/makepromo число число дни, /promos, /botstatus\nДоступ только подтверждённым Telegram ID. USD без фактического тарифа не рассчитываем.',makeButtons([[button('Статистика','a:today')],[button('Тикеты','a:tickets')],[button('⬅️ Назад','m')]]));}
  async function callback(uid,lang,data){
-  if(data==='m')return replyMenu(uid,lang);
+  if(data==='m')return showInlineMenu(uid,lang);
   if(data==='h')return balance(uid,lang);
   if(data==='u')return purchases(uid,lang);
   if(data==='z')return jobStatus(uid,lang);
@@ -349,7 +387,8 @@ export function createBotService({db,config,send,upload}){
  async function message(uid,lang,text){
   const parsed=/^\/([a-z_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i.exec(text||'');
   const cmd=parsed?.[1]?.toLowerCase(),arg=parsed?.[2]||'';
-  if(cmd==='start'||cmd==='menu')return replyMenu(uid,lang);
+  if(cmd==='start')return replyMenu(uid,lang);
+  if(cmd==='menu'||normalizeText(text)===normalizeText(texts.menu(lang))||normalizeText(text)==='меню'||normalizeText(text)==='menu'||normalizeText(text)==='мәзір')return showInlineMenu(uid,lang);
   if(cmd==='garage')return garage(uid,lang);
   if(cmd==='balance')return balance(uid,lang);
   if(cmd==='purchases')return purchases(uid,lang);
