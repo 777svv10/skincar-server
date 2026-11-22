@@ -53,6 +53,7 @@ const botHousekeeping=async()=>{
   await db.query("DELETE FROM bot_callback_receipts WHERE received_at<now()-interval '7 days'");
   await db.query("DELETE FROM bot_rate_limits WHERE window_start<now()-interval '2 days'");
   await db.query("DELETE FROM bot_support_state WHERE awaiting=false AND updated_at<now()-interval '30 days'");
+  await db.query("DELETE FROM bot_admin_input_state WHERE updated_at<now()-interval '24 hours'");
  }catch(e){console.error('Bot housekeeping failed',e.code||e.name);}
 };
 setInterval(botHousekeeping,6*3600000).unref();

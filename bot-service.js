@@ -127,6 +127,17 @@ function menuMarkup(lang,url,isAdmin=false,garageEnabled=true){const rows=[
  [button('📜 Покупки','u'),button('⏳ Статус работ','z')]
  ];if(isAdmin)rows.push([button(texts.admin(lang),'a')]);return makeButtons(rows);
 }
+
+// SK-111 / Bot Admin UI: visible only after a fresh allowlist check.
+export function adminHomeKeyboard(){return makeButtons([
+ [button('📊 Статистика','a:stats_today'),button('💵 Себестоимость','a:cost_today')],
+ [button('👥 Пользователи','a:users'),button('🖼 Генерации','a:jobs')],
+ [button('🎟 Промокоды','a:promos'),button('💳 Балансы','a:credits')],
+ [button('📨 Поддержка','a:support'),button('⚙️ Система','a:system')],
+ [button('⬅️ В главное меню','m')]
+]);}
+const adminSectionKeyboard=(section,buttons)=>makeButtons([...buttons,[button('⬅️ Админка','a')]]);
+
 async function ensureUser(db,from){
  const lang=langOf({from});const name=slice([from.first_name,from.last_name].filter(Boolean).join(' ')||'SkinCar User',80)||'SkinCar User';
  await db.query(`INSERT INTO users (telegram_id,display_name,lang,telegram_username) VALUES($1,$2,$3,$4)
@@ -290,6 +301,93 @@ export function createBotService({db,config,send,upload}){
   [button(type==='cost'?'📊 Статистика':'💵 Себестоимость',`a:${type==='cost'?'stats':'cost'}_${range}`)],
   [button('⬅️ Админка','a')]
  ]);
+
+ async function setAdminInput(uid,action,ticketId=null,payload={}){
+  await db.query(`INSERT INTO bot_admin_input_state(telegram_id,action,ticket_id,payload,updated_at)
+   VALUES($1,$2,$3,$4,now()) ON CONFLICT(telegram_id)
+   DO UPDATE SET action=EXCLUDED.action,ticket_id=EXCLUDED.ticket_id,payload=EXCLUDED.payload,updated_at=now()`,
+   [uid,action,ticketId,JSON.stringify(payload)]);
+ }
+ async function clearAdminInput(uid){await db.query('DELETE FROM bot_admin_input_state WHERE telegram_id=$1',[uid]);}
+ async function readAdminInput(uid){
+  const r=await db.query(`SELECT action,ticket_id,payload FROM bot_admin_input_state
+   WHERE telegram_id=$1 AND updated_at>now()-interval '10 minutes'`,[uid]);
+  return r.rows[0]||null;
+ }
+ async function takeAdminInput(uid,action){
+  const r=await db.query(`DELETE FROM bot_admin_input_state WHERE telegram_id=$1 AND action=$2
+   AND updated_at>now()-interval '10 minutes' RETURNING action,ticket_id,payload`,[uid,action]);
+  return r.rows[0]||null;
+ }
+ async function adminUsers(uid){
+  const a=(await db.query('SELECT count(*) AS n FROM users')).rows[0]||{};
+  const g=(await db.query('SELECT count(*) AS n FROM generations')).rows[0]||{};
+  return tell(uid,`👥 Пользователи SkinCar\n\nВсего аккаунтов: ${num(a.n)}\nВсего созданных генераций: ${num(g.n)}\n\nЛичные данные пользователей здесь не выводятся.`,adminSectionKeyboard('users',[
+   [button('📊 Статистика','a:stats_today')],[button('🖼 Генерации','a:jobs')]
+  ]));
+ }
+ async function adminJobs(uid){return tell(uid,'🖼 Генерации\n\nРаботы, модели, токены и выгрузки.',adminSectionKeyboard('jobs',[
+  [button('🕒 Последние 10','a:jobs:last'),button('🧠 Модели','a:jobs:models')],
+  [button('📊 Статистика','a:stats_today'),button('📥 Скачать CSV','a:export_month')]
+ ]));}
+ async function adminCreditsMenu(uid){return tell(uid,'💳 Управление балансами\n\nНачисления и списания требуют подтверждения и записываются в журнал. Доступ — только двум разрешённым администраторам.',adminSectionKeyboard('credits',[
+  [button('➕ Начислить','a:input:credit'),button('➖ Списать','a:input:debit')],
+  [button('📊 Финансовая статистика','a:cost_today')]
+ ]));}
+ async function adminPromosMenu(uid){return tell(uid,'🎟 Промокоды SkinCar\n\nВыпуск, сроки, количество активаций и общая статистика.',adminSectionKeyboard('promos',[
+  [button('➕ Создать промокод','a:input:promo')],
+  [button('📊 Статистика промокодов','a:promos:stats')]
+ ]));}
+ async function adminSupportMenu(uid){return tell(uid,'📨 Поддержка SkinCar\n\nОткрой обращение кнопкой, ответь пользователю или закрой тикет.',adminSectionKeyboard('support',[
+  [button('📥 Обращения','a:tickets')]
+ ]));}
+ async function adminSystemMenu(uid){return tell(uid,'⚙️ Система SkinCar\n\nСостояние сервера и лимиты. Настройка прав производится через Railway.',adminSectionKeyboard('system',[
+  [button('🟢 Статус бота','a:system:status'),button('🛡 Лимиты','a:system:limits')],
+  [button('🧠 Модели','a:jobs:models')]
+ ]));}
+ async function adminStartInput(uid,action){
+  if(action==='credit'||action==='debit'){
+   if(!creditAdminEnabled)return tell(uid,'Управление балансами отключено в Railway.');
+   await setAdminInput(uid,action);
+   return tell(uid,`${action==='credit'?'➕ Начисление':'➖ Списание'}\n\nОтправь сообщением: ID пользователя, количество от 1 до 100, причина (не менее 3 символов).\n\nПример: 123456789 5 Тестовое начисление\n\nСледующий шаг — отдельное подтверждение.`,makeButtons([[button('❌ Отмена','a:input:cancel')],[button('⬅️ Балансы','a:credits')]]));
+  }
+  if(action==='promo'){
+   if(!promosEnabled)return tell(uid,'Промокоды отключены в Railway.');
+   await setAdminInput(uid,'promo');
+   return tell(uid,'🎟 Создание промокода\n\nОтправь три числа через пробел: генераций (1–20), количество активаций (1–100), срок действия в днях (1–30).\n\nПример: 3 10 7\n\nПеред выпуском я покажу подтверждение.',makeButtons([[button('❌ Отмена','a:input:cancel')],[button('⬅️ Промокоды','a:promos')]]));
+  }
+ }
+ async function adminInputMessage(uid,lang,text,state){
+  if(state.action==='credit'||state.action==='debit'){
+   const claimed=await takeAdminInput(uid,state.action);
+   if(!claimed)return tell(uid,'Запрос уже использован или устарел. Открой раздел «Балансы» заново.');
+   return adminCredit(uid,lang,text,state.action==='credit'?1:-1);
+  }
+  if(state.action==='ticket_reply'){
+   const consumed=await takeAdminInput(uid,'ticket_reply');
+   if(!consumed?.ticket_id||!isUuid(consumed.ticket_id))return tell(uid,'Обращение устарело, открой его снова.');
+   if(text.trim().length<2||text.length>1500)return tell(uid,'Ответ должен содержать от 2 до 1500 символов. Открой обращение и попробуй снова.');
+   return adminReply(uid,String(consumed.ticket_id)+' '+text);
+  }
+  if(state.action==='promo_confirm')return tell(uid,'Промокод ещё не выпущен. Нажми кнопку подтверждения или отмены.',makeButtons([[button('✅ Выпустить промокод','a:promo:confirm')],[button('❌ Отмена','a:input:cancel')]]));
+  if(state.action==='promo'){
+   const m=/^(\d{1,2})\s+(\d{1,3})\s+(\d{1,2})$/.exec(text.trim());
+   if(!m||Number(m[1])<1||Number(m[1])>20||Number(m[2])<1||Number(m[2])>100||Number(m[3])<1||Number(m[3])>30)
+    return tell(uid,'Неверные параметры. Пример: 3 10 7. Допустимо: 1–20 генераций, 1–100 активаций, 1–30 дней.',makeButtons([[button('❌ Отмена','a:input:cancel')]]));
+   await setAdminInput(uid,'promo_confirm',null,{credits:Number(m[1]),maxUses:Number(m[2]),days:Number(m[3])});
+   return tell(uid,`🎟 Подтверждение выпуска\n\nГенераций: ${m[1]}\nАктиваций: ${m[2]}\nСрок: ${m[3]} дней\n\nПромокод пока НЕ создан.`,makeButtons([[button('✅ Выпустить промокод','a:promo:confirm')],[button('❌ Отмена','a:input:cancel')]]));
+  }
+ }
+ async function adminPromoConfirm(uid){
+  if(!promosEnabled)return tell(uid,'Промокоды выключены в Railway.');
+  const state=await takeAdminInput(uid,'promo_confirm');
+  if(!state)return tell(uid,'Подтверждение истекло или уже использовано.',makeButtons([[button('⬅️ Промокоды','a:promos')]]));
+  const v=state.payload||{};
+  if(!Number.isSafeInteger(v.credits)||!Number.isSafeInteger(v.maxUses)||!Number.isSafeInteger(v.days))return tell(uid,'Параметры промокода недействительны.');
+  // Reuse centralized limits, token hashing, audit and random-code generation.
+  return adminPromo(uid,`${v.credits} ${v.maxUses} ${v.days}`);
+ }
+
  async function adminStats(uid,range='today'){
   const report=await loadGenerationAnalytics(db,range,config);
   const filter=periodFilter(range);
@@ -311,13 +409,13 @@ export function createBotService({db,config,send,upload}){
   const data=(await db.query(`SELECT model,count(*) AS total,count(*) FILTER(WHERE status='done') AS done,
    coalesce(sum(CASE WHEN usage->>'total_tokens' ~ '^[0-9]+$' THEN (usage->>'total_tokens')::bigint ELSE 0 END),0) AS tokens
    FROM generations GROUP BY model ORDER BY total DESC LIMIT 10`)).rows;
-  return tell(uid,data.length?'Модели (все даты):\n'+data.map(x=>`${slice(x.model,45)}: ${num(x.total)} всего, ${num(x.done)} успешно, ${num(x.tokens)} токенов`).join('\n'):'Моделей в статистике пока нет.');
+  return tell(uid,data.length?'Модели (все даты):\n'+data.map(x=>`${slice(x.model,45)}: ${num(x.total)} всего, ${num(x.done)} успешно, ${num(x.tokens)} токенов`).join('\n'):'Моделей в статистике пока нет.',adminSectionKeyboard('jobs',[[button('⬅️ Генерации','a:jobs')]]));
  }
  async function adminLast(uid){
   const data=(await db.query(`SELECT id,model,status,created_at,options->>'qualityMode' AS quality,
    CASE WHEN usage->>'total_tokens' ~ '^[0-9]+$' THEN (usage->>'total_tokens')::bigint ELSE NULL END AS tokens
    FROM generations ORDER BY created_at DESC LIMIT 10`)).rows;
-  return tell(uid,data.length?'Последние генерации (без фото):\n'+data.map(x=>`${x.id.slice(0,8)} · ${slice(x.model,24)} · ${x.status} · ${x.quality||'—'} · ${x.tokens??'?'} ток.`).join('\n'):'Генераций пока нет.');
+  return tell(uid,data.length?'Последние генерации (без фото):\n'+data.map(x=>`${x.id.slice(0,8)} · ${slice(x.model,24)} · ${x.status} · ${x.quality||'—'} · ${x.tokens??'?'} ток.`).join('\n'):'Генераций пока нет.',adminSectionKeyboard('jobs',[[button('⬅️ Генерации','a:jobs')]]));
  }
  async function adminCost(uid,range='today'){
   const report=await loadGenerationAnalytics(db,range,config);
@@ -356,8 +454,23 @@ export function createBotService({db,config,send,upload}){
    try{await tell(out.targetId,`💳 Баланс SkinCar изменён администратором: ${out.delta>0?'+':''}${out.delta}. Проверить: /balance`);}catch{}
   }catch(e){return tell(uid,`Заявка недоступна: ${e.code||'ACTION_ERROR'}`);}
  }
- async function adminTickets(uid){const rows=(await db.query(`SELECT id,telegram_id,subject,status FROM bot_tickets WHERE status='open' ORDER BY created_at DESC LIMIT 10`)).rows;
-  return tell(uid,rows.length?'Открытые тикеты:\n'+rows.map(r=>`${r.id}\n${r.telegram_id}: ${slice(r.subject,90)}\nОтвет: /reply ${r.id} текст`).join('\n\n'):'Открытых тикетов нет.');
+ async function adminTickets(uid){
+  const rows=(await db.query(`SELECT id,telegram_id,subject,status FROM bot_tickets
+   WHERE status IN ('open','answered') ORDER BY created_at DESC LIMIT 10`)).rows;
+  const nav=rows.map((r,i)=>[button(`📩 ${i+1}. ${slice(r.subject,28)} · ${r.status==='answered'?'ответили':'новое'}`,`a:ticket:${r.id}`)]);
+  nav.push([button('🔄 Обновить','a:tickets')],[button('⬅️ Поддержка','a:support')]);
+  return tell(uid,rows.length?`📨 Обращения · ${rows.length} последних\n\nВыбери заявку, чтобы ответить или закрыть.`:'📨 Сейчас нет открытых обращений.',makeButtons(nav));
+ }
+ async function adminTicket(uid,id){
+  if(!isUuid(id))return tell(uid,'Некорректный идентификатор обращения.');
+  const row=(await db.query('SELECT id,telegram_id,subject,status,created_at FROM bot_tickets WHERE id=$1',[id])).rows[0];
+  if(!row)return tell(uid,'Обращение не найдено.',makeButtons([[button('⬅️ Обращения','a:tickets')]]));
+  const actions=row.status==='closed'?[]:[
+   [button('✉️ Ответить','a:ticket:reply:'+id)],
+   [button('✅ Закрыть обращение','a:ticket:close:'+id)]
+  ];
+  return tell(uid,`📨 Обращение ${id.slice(0,8)}\nСтатус: ${row.status}\nПользователь: ${row.telegram_id}\nСоздано: ${new Date(row.created_at).toISOString()}\n\n${slice(row.subject,1000)}`,
+   makeButtons([...actions,[button('⬅️ Обращения','a:tickets')]]));
  }
  async function adminClose(uid,arg){
   const id=arg.trim();if(!isUuid(id))return tell(uid,'Используй: /close <UUID тикета>');
@@ -367,12 +480,15 @@ export function createBotService({db,config,send,upload}){
   try{await tell(r.rows[0].telegram_id,`✅ Обращение ${id.slice(0,8)} закрыто.`);}catch{}
  }
  async function adminReply(uid,body){const m=/^([a-f0-9-]{36})\s+([\s\S]{2,1500})$/i.exec(body.trim());if(!m||!isUuid(m[1]))return tell(uid,'Используй: /reply <UUID тикета> <текст>');
-  const t=(await db.query(`SELECT id,telegram_id FROM bot_tickets WHERE id=$1 AND status='open'`,[m[1]])).rows[0];if(!t)return tell(uid,'Тикет не найден или уже закрыт.');
+  const t=(await db.query(`SELECT id,telegram_id FROM bot_tickets WHERE id=$1 AND status IN ('open','answered')`,[m[1]])).rows[0];if(!t)return tell(uid,'Тикет не найден или уже закрыт.');
   await tell(t.telegram_id,`✉️ Поддержка SkinCar\nОбращение ${t.id.slice(0,8)}:\n${slice(m[2],1500)}`);
-  await db.query(`UPDATE bot_tickets SET status='answered',answer=$2,answered_at=now(),admin_id=$3 WHERE id=$1 AND status='open'`,[t.id,slice(m[2],1500),uid]);
+  await db.query(`UPDATE bot_tickets SET status='answered',answer=$2,answered_at=now(),admin_id=$3 WHERE id=$1 AND status IN ('open','answered')`,[t.id,slice(m[2],1500),uid]);
   return tell(uid,'Ответ отправлен.');
  }
- async function adminMenu(uid){return tell(uid,'🔒 Администрация SkinCar\n/stats, /stats_week, /stats_month, /stats_quarter, /stats_year, /stats_all\n/cost, /cost_week, /cost_month, /cost_quarter, /cost_year, /cost_all\n/export_month (CSV), /models, /last, /limits\n/tickets, /reply ID текст, /close ID\n/credit ID число причина, /debit ID число причина\n/makepromo число число дни, /promos, /botstatus\nДоступ только подтверждённым Telegram ID. USD оцениваем только при заданном тарифе; фактический счёт OpenAI не читаем.',makeButtons([[button('Статистика','a:today'),button('Расходы','a:cost_today')],[button('Тикеты','a:tickets')],[button('⬅️ Назад','m')]]));}
+ async function adminMenu(uid){
+  await clearAdminInput(uid);
+  return tell(uid,'🔒 Администрация SkinCar\n\nВыбери раздел ниже. Статистика, расходы, поддержка, промокоды и балансы теперь управляются кнопками.\n\nОперации с генерациями и выпуском промокодов требуют подтверждения.',adminHomeKeyboard());
+ }
  async function callback(uid,lang,data){
   if(data==='m')return showInlineMenu(uid,lang);
   if(data==='h')return balance(uid,lang);
@@ -382,8 +498,42 @@ export function createBotService({db,config,send,upload}){
   if(data==='s')return startSupport(uid,lang);
   if(data==='n')return showNotifications(uid,lang);
   if(data==='a'&&isAdmin(uid))return adminMenu(uid);
+  if(data?.startsWith('a:')&&!isAdmin(uid))return reply(uid,lang,texts.cant(lang));
+  if(data?.startsWith('a:')&&!data.startsWith('a:input:')&&data!=='a:promo:confirm')await clearAdminInput(uid);
   if(/^f:[0-4]$/.test(data)){const answer=localizedFaq(lang,Number(data[2]));return reply(uid,lang,answer,makeButtons([[button(texts.back(lang),'q')]]));}
   if(data==='a:tickets'&&isAdmin(uid))return adminTickets(uid);
+  if(data==='a:users')return adminUsers(uid);
+  if(data==='a:jobs')return adminJobs(uid);
+  if(data==='a:credits')return adminCreditsMenu(uid);
+  if(data==='a:promos')return adminPromosMenu(uid);
+  if(data==='a:support')return adminSupportMenu(uid);
+  if(data==='a:system')return adminSystemMenu(uid);
+  if(data==='a:jobs:last')return adminLast(uid);
+  if(data==='a:jobs:models')return adminModels(uid);
+  if(data==='a:promos:stats'){
+   if(!promosEnabled)return tell(uid,'Промокоды отключены в Railway.');
+   const r=await promoSummary(db);
+   return tell(uid,`🎟 Промокоды\nВсего: ${num(r.count)}\nАктиваций: ${num(r.activations)}\nВыдано генераций: ${num(r.credits_issued)}`,adminSectionKeyboard('promos',[[button('➕ Создать промокод','a:input:promo')]]));
+  }
+  if(data==='a:system:status')return tell(uid,`🟢 Сервис SkinCar\nГараж: ${garageEnabled?'включён':'отключён'}\nАдминистраторов: ${admins.size}\nStars: ${config.PAYMENTS_MODE||'off'}\nНачисления: ${creditAdminEnabled?'включены':'выключены'}\nПромокоды: ${promosEnabled?'включены':'выключены'}`,adminSectionKeyboard('system',[]));
+  if(data==='a:system:limits')return tell(uid,'🛡 Лимиты\n10 генераций / 24 ч (кроме разрешённых тестировщиков); до 1 активной генерации на аккаунт; отдельная защита API от частых запросов. Баланс OpenAI в реальном времени не запрашиваем.',adminSectionKeyboard('system',[]));
+  if(/^a:input:(credit|debit|promo)$/.test(data))return adminStartInput(uid,data.split(':')[2]);
+  if(data==='a:input:cancel'){await clearAdminInput(uid);return adminMenu(uid);}
+  if(data==='a:promo:confirm')return adminPromoConfirm(uid);
+  const ticketMatch=/^a:ticket:([a-f0-9-]{36})$/i.exec(data);
+  if(ticketMatch&&isUuid(ticketMatch[1]))return adminTicket(uid,ticketMatch[1]);
+  const ticketReply=/^a:ticket:reply:([a-f0-9-]{36})$/i.exec(data);
+  if(ticketReply&&isUuid(ticketReply[1])){
+   const row=(await db.query(`SELECT id FROM bot_tickets WHERE id=$1 AND status IN ('open','answered')`,[ticketReply[1]])).rows[0];
+   if(!row)return tell(uid,'Обращение уже закрыто или удалено.');
+   await setAdminInput(uid,'ticket_reply',ticketReply[1]);
+   return tell(uid,`✉️ Ответ на обращение ${ticketReply[1].slice(0,8)}\n\nОтправь следующим сообщением текст ответа от 2 до 1500 символов. Он будет доставлен пользователю.`,makeButtons([[button('❌ Отмена','a:input:cancel')],[button('⬅️ Обращение',`a:ticket:${ticketReply[1]}`)]]));
+  }
+  const ticketClose=/^a:ticket:close:([a-f0-9-]{36})$/i.exec(data);
+  if(ticketClose&&isUuid(ticketClose[1]))return tell(uid,`Закрыть обращение ${ticketClose[1].slice(0,8)}?`,makeButtons([[button('✅ Да, закрыть',`a:ticket:confirm:${ticketClose[1]}`)],[button('❌ Нет',`a:ticket:${ticketClose[1]}`)]]));
+  const ticketConfirm=/^a:ticket:confirm:([a-f0-9-]{36})$/i.exec(data);
+  if(ticketConfirm&&isUuid(ticketConfirm[1]))return adminClose(uid,ticketConfirm[1]);
+
   if(/^c:[a-f0-9-]{36}$/i.test(data)&&isAdmin(uid))return confirmCredit(uid,data.slice(2),true);
   if(/^k:[a-f0-9-]{36}$/i.test(data)&&isAdmin(uid))return confirmCredit(uid,data.slice(2),false);
   if(/^a:(today|week|month)$/.test(data)&&isAdmin(uid))return adminStats(uid,data.split(':')[1]);
@@ -450,6 +600,7 @@ export function createBotService({db,config,send,upload}){
    if(/^export_(today|week|month|quarter|year|all)$/.test(cmd))return exportStats(uid,cmd.slice(7));
    if(cmd==='limits')return tell(uid,'Лимиты задаются сервером: 10 генераций за 24 ч (кроме разрешённых тестеров), до 1 активной задачи на пользователя, защита от очередей. Баланс OpenAI в реальном времени недоступен.');
   }
+  if(isAdmin(uid)&&!parsed&&text){const adminState=await readAdminInput(uid);if(adminState)return adminInputMessage(uid,lang,text,adminState);}
   if(!parsed&&text){const state=(await db.query('SELECT awaiting FROM bot_support_state WHERE telegram_id=$1',[uid])).rows[0];if(state?.awaiting)return supportMessage(uid,lang,text);}
   return replyMenu(uid,lang);
  }
