@@ -3,7 +3,7 @@
 // No Telegram file_id, callback data or chat history authorizes access to a deleted image.
 import {randomUUID} from 'node:crypto';
 import {stageCreditAction,confirmCreditAction,cancelCreditAction,issuePromo,redeemPromo,promoSummary} from './bot-admin-ops.js';
-import {loadGenerationAnalytics,analyticsText} from './image-analytics.js';
+import {loadGenerationAnalytics,analyticsText,periodFilter,periodLabel,loadGenerationExport,reportToCsv} from './image-analytics.js';
 
 const PAGE_SIZE=6;
 const JOB_PAGE_SIZE=5;
@@ -283,13 +283,29 @@ export function createBotService({db,config,send,upload}){
  async function myTickets(uid,lang){const rows=(await db.query('SELECT id,status,created_at FROM bot_tickets WHERE telegram_id=$1 ORDER BY created_at DESC LIMIT 8',[uid])).rows;
   return reply(uid,lang,rows.length?rows.map(x=>`${x.id.slice(0,8)} · ${x.status}`).join('\n'):tr(lang,'Обращений пока нет.','Әзірге өтініштер жоқ.','No tickets yet.'));
  }
+ const periodsMenu=(type,range)=>makeButtons([
+  [button('24 ч',`a:${type}_today`),button('7 д',`a:${type}_week`),button('30 д',`a:${type}_month`)],
+  [button('90 д',`a:${type}_quarter`),button('365 д',`a:${type}_year`),button('Всё время',`a:${type}_all`)],
+  [button('📥 Скачать CSV',`a:export_${range}`)],
+  [button(type==='cost'?'📊 Статистика':'💵 Себестоимость',`a:${type==='cost'?'stats':'cost'}_${range}`)],
+  [button('⬅️ Админка','a')]
+ ]);
  async function adminStats(uid,range='today'){
   const report=await loadGenerationAnalytics(db,range,config);
-  const interval=range==='week'?'7 days':range==='month'?'30 days':'1 day';
-  const u=(await db.query('SELECT count(*) AS n FROM users')).rows[0]||{};
-  const revenue=(await db.query(`SELECT coalesce(sum(stars),0) AS stars FROM payment_receipts WHERE refunded_at IS NULL AND created_at>=now()-($1::interval)`,[interval])).rows[0]||{};
-  const header=`Пользователей всего: ${num(u.n)}\nStars за период (невозвращённые): ${num(revenue.stars)}\n\n`;
-  return tell(uid,header+analyticsText(report,'stats'),makeButtons([[button('24 ч','a:today'),button('7 дней','a:week'),button('30 дней','a:month')],[button('💵 Себестоимость','a:cost_today')],[button('⬅️ Админка','a')]]));
+  const filter=periodFilter(range);
+  const users=(await db.query('SELECT count(*) AS n FROM users')).rows[0]||{};
+  const revenue=(await db.query(`SELECT coalesce(sum(stars),0) AS stars FROM payment_receipts ${filter.where?filter.where+' AND refunded_at IS NULL':'WHERE refunded_at IS NULL'}`,filter.params)).rows[0]||{};
+  const title=`Пользователей всего: ${num(users.n)}\nStars за период (без возвратов): ${num(revenue.stars)}\n\n`;
+  return tell(uid,title+analyticsText(report,'stats'),periodsMenu('stats',range));
+ }
+ async function exportStats(uid,range='month'){
+  if(!await checkRate(db,uid,'admin_export',6,3600))return tell(uid,'Лимит выгрузок: 6 файлов за час.');
+  const report=await loadGenerationExport(db,range,config);
+  if(report.truncated)return tell(uid,'В выбранном периоде больше 10 000 записей. Для полной выгрузки выбери меньший период; частичный CSV не отправляется.');
+  const bytes=reportToCsv(report);
+  if(bytes.length>48*1024*1024)return tell(uid,'Выгрузка слишком большая. Выбери меньший период.');
+  const stamp=new Date().toISOString().slice(0,10);
+  await upload('sendDocument',{chat_id:uid,field:'document',bytes,mime:'text/csv; charset=utf-8',filename:`SkinCar_analytics_${range}_${stamp}.csv`,caption:`SkinCar · ${periodLabel(range)} · ${report.rows.length} записей · CSV (Excel). Стоимость — оценка, не инвойс OpenAI.`});
  }
  async function adminModels(uid){
   const data=(await db.query(`SELECT model,count(*) AS total,count(*) FILTER(WHERE status='done') AS done,
@@ -305,7 +321,7 @@ export function createBotService({db,config,send,upload}){
  }
  async function adminCost(uid,range='today'){
   const report=await loadGenerationAnalytics(db,range,config);
-  return tell(uid,analyticsText(report,'cost'),makeButtons([[button('24 ч','a:cost_today'),button('7 дней','a:cost_week'),button('30 дней','a:cost_month')],[button('📊 Статистика','a:today')],[button('⬅️ Админка','a')]]));
+  return tell(uid,analyticsText(report,'cost'),periodsMenu('cost',range));
  }
  async function adminCredit(uid,lang,arg,deltaSign){
   if(!creditAdminEnabled)return tell(uid,'Управление балансом отключено. Для включения нужен BOT_CREDIT_ADMIN_ENABLED=true в Railway.');
@@ -356,7 +372,7 @@ export function createBotService({db,config,send,upload}){
   await db.query(`UPDATE bot_tickets SET status='answered',answer=$2,answered_at=now(),admin_id=$3 WHERE id=$1 AND status='open'`,[t.id,slice(m[2],1500),uid]);
   return tell(uid,'Ответ отправлен.');
  }
- async function adminMenu(uid){return tell(uid,'🔒 Администрация SkinCar\n/stats, /stats_week, /stats_month, /models, /last, /cost, /cost_week, /cost_month, /limits\n/tickets, /reply ID текст, /close ID\n/credit ID число причина, /debit ID число причина\n/makepromo число число дни, /promos, /botstatus\nДоступ только подтверждённым Telegram ID. USD оцениваем только при заданном тарифе; фактический счёт OpenAI не читаем.',makeButtons([[button('Статистика','a:today'),button('Расходы','a:cost_today')],[button('Тикеты','a:tickets')],[button('⬅️ Назад','m')]]));}
+ async function adminMenu(uid){return tell(uid,'🔒 Администрация SkinCar\n/stats, /stats_week, /stats_month, /stats_quarter, /stats_year, /stats_all\n/cost, /cost_week, /cost_month, /cost_quarter, /cost_year, /cost_all\n/export_month (CSV), /models, /last, /limits\n/tickets, /reply ID текст, /close ID\n/credit ID число причина, /debit ID число причина\n/makepromo число число дни, /promos, /botstatus\nДоступ только подтверждённым Telegram ID. USD оцениваем только при заданном тарифе; фактический счёт OpenAI не читаем.',makeButtons([[button('Статистика','a:today'),button('Расходы','a:cost_today')],[button('Тикеты','a:tickets')],[button('⬅️ Назад','m')]]));}
  async function callback(uid,lang,data){
   if(data==='m')return showInlineMenu(uid,lang);
   if(data==='h')return balance(uid,lang);
@@ -371,7 +387,10 @@ export function createBotService({db,config,send,upload}){
   if(/^c:[a-f0-9-]{36}$/i.test(data)&&isAdmin(uid))return confirmCredit(uid,data.slice(2),true);
   if(/^k:[a-f0-9-]{36}$/i.test(data)&&isAdmin(uid))return confirmCredit(uid,data.slice(2),false);
   if(/^a:(today|week|month)$/.test(data)&&isAdmin(uid))return adminStats(uid,data.split(':')[1]);
-  if(/^a:cost_(today|week|month)$/.test(data)&&isAdmin(uid))return adminCost(uid,data.split('_')[1]);
+  if(/^a:(stats|cost|export)_(today|week|month|quarter|year|all)$/.test(data)&&isAdmin(uid)){
+   const [,type,period]=data.match(/^a:(stats|cost|export)_(today|week|month|quarter|year|all)$/);
+   return type==='stats'?adminStats(uid,period):type==='cost'?adminCost(uid,period):exportStats(uid,period);
+  }
   const c=botCallback(data);if(!c)return reply(uid,lang,texts.cant(lang));
   if(!garageEnabled&&['garage','vehicle','works','last','photos','media'].includes(c.type))return reply(uid,lang,'Гараж через бота временно недоступен. Открой SkinCar.');
   switch(c.type){
@@ -409,6 +428,9 @@ export function createBotService({db,config,send,upload}){
    if(cmd==='stats')return adminStats(uid,'today');
    if(cmd==='stats_week')return adminStats(uid,'week');
    if(cmd==='stats_month')return adminStats(uid,'month');
+   if(cmd==='stats_quarter')return adminStats(uid,'quarter');
+   if(cmd==='stats_year')return adminStats(uid,'year');
+   if(cmd==='stats_all')return adminStats(uid,'all');
    if(cmd==='tickets')return adminTickets(uid);
    if(cmd==='reply')return adminReply(uid,arg);
    if(cmd==='close')return adminClose(uid,arg);
@@ -422,6 +444,10 @@ export function createBotService({db,config,send,upload}){
    if(cmd==='cost')return adminCost(uid);
    if(cmd==='cost_week')return adminCost(uid,'week');
    if(cmd==='cost_month')return adminCost(uid,'month');
+   if(cmd==='cost_quarter')return adminCost(uid,'quarter');
+   if(cmd==='cost_year')return adminCost(uid,'year');
+   if(cmd==='cost_all')return adminCost(uid,'all');
+   if(/^export_(today|week|month|quarter|year|all)$/.test(cmd))return exportStats(uid,cmd.slice(7));
    if(cmd==='limits')return tell(uid,'Лимиты задаются сервером: 10 генераций за 24 ч (кроме разрешённых тестеров), до 1 активной задачи на пользователя, защита от очередей. Баланс OpenAI в реальном времени недоступен.');
   }
   if(!parsed&&text){const state=(await db.query('SELECT awaiting FROM bot_support_state WHERE telegram_id=$1',[uid])).rows[0];if(state?.awaiting)return supportMessage(uid,lang,text);}

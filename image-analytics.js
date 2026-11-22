@@ -70,32 +70,77 @@ export function summarizeGenerations(rows=[],rates={},truncated=false){
  if(durationCount)summary.averageProcessingSeconds=durationSum/(durationCount*1000);
  return summary;
 }
-export const ANALYTICS_PERIODS=Object.freeze({today:'1 day',week:'7 days',month:'30 days'});
+export const ANALYTICS_PERIODS=Object.freeze({today:'1 day',week:'7 days',month:'30 days',quarter:'90 days',year:'365 days',all:null});
+export const periodLabel=period=>({today:'24 часа',week:'7 дней',month:'30 дней',quarter:'90 дней',year:'365 дней',all:'всё время'})[period]||'—';
+export function periodFilter(period,column='created_at'){
+ if(!Object.hasOwn(ANALYTICS_PERIODS,period))throw Error('SK108_RANGE_INVALID');
+ if(column!=='created_at'&&column!=='g.created_at')throw Error('SK108_COLUMN_INVALID');
+ const interval=ANALYTICS_PERIODS[period];
+ return interval?{where:`WHERE ${column}>=now()-($1::interval)`,params:[interval]}:{where:'',params:[]};
+}
+export async function loadGenerationExport(db,period='month',config={}){
+ const filter=periodFilter(period);
+ const {rows}=await db.query(`SELECT id,created_at,started_at,finished_at,model,status,options->>'qualityMode' AS quality,
+ charged_credits,refunded,usage FROM generations ${filter.where} ORDER BY created_at DESC LIMIT 10001`,filter.params);
+ let rates={},pricingError=false;
+ try{rates=parseImageRates(config.SKINCAR_IMAGE_RATES_JSON||'');}catch{pricingError=true;}
+ return {period,rows:rows.slice(0,10000),truncated:rows.length>10000,rates,pricingError};
+}
+const escapeCsv=value=>{
+ let s=String(value??'').replaceAll('\r',' ').replaceAll('\n',' ').replaceAll('\0','');
+ if(/^[\s]*[=+@-]/.test(s))s="'"+s;
+ return `"${s.replaceAll('"','""')}"`;
+};
+export function reportToCsv(report){
+ const headers=['UTC','Generation ID','Model','Status','Quality','Charged credits','Refunded','Input tokens','Text input','Image input','Output tokens','Total tokens','Estimated USD','Tariff version','Processing seconds'];
+ const lines=[headers.map(escapeCsv).join(',')];
+ for(const row of report.rows){
+  const usage=normalizeImageUsage(row.usage);
+  const model=String(row.model||'unknown');
+  const price=row.status==='done'?estimateImageUSD(model,row.usage,report.rates):null;
+  const start=row.started_at?new Date(row.started_at).getTime():NaN;
+  const end=row.finished_at?new Date(row.finished_at).getTime():NaN;
+  const seconds=Number.isFinite(start)&&Number.isFinite(end)&&end>=start?((end-start)/1000).toFixed(1):'';
+  const data=[row.created_at?new Date(row.created_at).toISOString():'',row.id||'',model,row.status||'',
+  asQuality(row.quality),row.charged_credits??'',row.refunded===true?'yes':'no',usage.input??'',usage.text??'',usage.image??'',usage.output??'',usage.total??'',price?price.usd.toFixed(8):'',price?.version||'',seconds];
+  lines.push(data.map(escapeCsv).join(','));
+ }
+ return Buffer.from('\uFEFF'+lines.join('\r\n')+'\r\n','utf8');
+}
+
 export async function loadGenerationAnalytics(db,period='today',config={}){
- const interval=ANALYTICS_PERIODS[period];if(!interval)throw Error('SK108_RANGE_INVALID');
+ const filter=periodFilter(period);
  let rates={},pricingError=false;
  try{rates=parseImageRates(config.SKINCAR_IMAGE_RATES_JSON||'');}catch{pricingError=true;}
  // Bounded server-side reads: if truncated, do NOT present the values as complete totals.
  const {rows}=await db.query(`SELECT model,status,options->>'qualityMode' AS quality,
     charged_credits,refunded,usage,started_at,finished_at
-    FROM generations WHERE created_at>=now()-($1::interval)
-    ORDER BY created_at DESC LIMIT 10001`,[interval]);
+    FROM generations ${filter.where}
+    ORDER BY created_at DESC LIMIT 10001`,filter.params);
  return {period,pricingConfigured:Object.keys(rates).length>0,pricingError,summary:summarizeGenerations(rows.slice(0,10000),rates,rows.length>10000)};
 }
 const n=v=>Number(v||0).toLocaleString('ru-RU');
 const usd=v=>'$'+Number(v||0).toFixed(4);
 export function analyticsText(report,kind='cost'){
- const s=report.summary;
- const range=report.period==='today'?'24 часа':report.period==='week'?'7 дней':'30 дней';
+ const s=report.summary,range=periodLabel(report.period);
  const cap=s.truncated?'⚠️ Достигнут лимит 10 000 записей: ниже только выборка.\n':'';
- const rateNote=report.pricingError?'⚠️ SKINCAR_IMAGE_RATES_JSON имеет неверный формат: USD не рассчитывается.':
-  !report.pricingConfigured?'Тарифы не настроены: USD не рассчитывается.':
-    s.unpriced?`⚠️ Оценка охватывает ${n(s.priced)} из ${n(s.done)} успешных запросов; остальные ${n(s.unpriced)} без подходящего тарифа или разбивки токенов.`:
-    'Оценка по настроенным тарифам; не является фактическим счётом OpenAI.';
  const head=`🔒 SkinCar · ${kind==='cost'?'Себестоимость':'Статистика'} · ${range}\n${cap}`;
- const counts=`Запросов: ${n(s.total)} · готово: ${n(s.done)} · ошибки: ${n(s.failed)} · выполняются: ${n(s.queued+s.processing)}\nСтандарт: ${n(s.standard)} · HD: ${n(s.hd)} · неизвестно: ${n(s.unknownQuality)}\nВозвраты: ${n(s.refunded)} · генераций списано (нетто): ${n(s.netCredits)}`;
- const toks=`Токены (есть usage: ${n(s.withUsage)}/${n(s.total)}): ${n(s.totalTokens)}\nВход: ${n(s.inputTokens)} · текст: ${n(s.textTokens)} · изображения: ${n(s.imageTokens)} · выход: ${n(s.outputTokens)}`;
- const costs=`USD, расчётная оценка: ${s.priced?usd(s.estimatedUSD):'—'}\nСтандарт: ${s.qualities.standard.priced?usd(s.qualities.standard.estimatedUSD):'—'} · HD: ${s.qualities.hd.priced?usd(s.qualities.hd.estimatedUSD):'—'}\n${rateNote}`;
- const top=Object.entries(s.models).sort((a,b)=>b[1].count-a[1].count).slice(0,4).map(([name,g])=>`• ${name}: ${n(g.count)} запросов, ${n(g.totalTokens)} ток.`).join('\n');
- return head+counts+'\n\n'+toks+'\n\n'+costs+(top?'\n\nМодели:\n'+top:'')+(s.averageProcessingSeconds!==null?`\n\nСреднее время обработки: ${s.averageProcessingSeconds.toFixed(1)} с`:'');
+ const status=`Запросов: ${n(s.total)} · готово: ${n(s.done)} · ошибки: ${n(s.failed)} · в работе: ${n(s.queued+s.processing)}\nСтандарт: ${n(s.standard)} · HD: ${n(s.hd)} · не указано: ${n(s.unknownQuality)}\nВозвраты: ${n(s.refunded)} · списано (нетто): ${n(s.netCredits)} генераций`;
+ const tokens=`Токены (usage: ${n(s.withUsage)}/${n(s.total)}): ${n(s.totalTokens)}\nВход: ${n(s.inputTokens)} · текст: ${n(s.textTokens)} · изображение: ${n(s.imageTokens)} · выход: ${n(s.outputTokens)}`;
+ const groups=Object.entries(s.models).sort((a,b)=>b[1].count-a[1].count).slice(0,8);
+ if(kind!=='cost'){
+  const models=groups.map(([name,g])=>`• ${name}: ${n(g.count)} запросов, ${n(g.totalTokens)} ток.`).join('\n');
+  return head+status+'\n\n'+tokens+(models?'\n\nМодели:\n'+models:'')+
+   (s.averageProcessingSeconds!==null?`\n\nСреднее время обработки: ${s.averageProcessingSeconds.toFixed(1)} с`:'');
+ }
+ const pricing=s.priced?usd(s.estimatedUSD):'—';
+ const modelCosts=groups.map(([name,g])=>`• ${name}: ${n(g.priced)}/${n(g.count)} оценено, ${g.priced?usd(g.estimatedUSD):'—'}`).join('\n');
+ const reason=report.pricingError?'⚠️ неверный формат SKINCAR_IMAGE_RATES_JSON.':
+  !report.pricingConfigured?'⚠️ Тарифы не настроены: USD не рассчитывается.':
+  s.unpriced?`⚠️ Стоимость рассчитана для ${n(s.priced)} из ${n(s.done)} успешных запросов; остальные ${n(s.unpriced)} не оценены.`:
+  'Тарифы настроены для всех успешно оценённых запросов.';
+ const disclaimer='Это расчётная стоимость API по текущим тарифам, не фактический счёт OpenAI. Исторические скидки и незавершённые вызовы могут отличаться.';
+ return head+`\nUSD, оценка: ${pricing}\nСтандарт: ${s.qualities.standard.priced?usd(s.qualities.standard.estimatedUSD):'—'} · HD: ${s.qualities.hd.priced?usd(s.qualities.hd.estimatedUSD):'—'} · качество не указано: ${s.qualities.unknown.priced?usd(s.qualities.unknown.estimatedUSD):'—'}`+
+  `\nОценено: ${n(s.priced)}/${n(s.done)} успешных вызовов\n\n`+tokens+
+  (modelCosts?'\n\nПо моделям:\n'+modelCosts:'')+'\n\n'+reason+'\n'+disclaimer;
 }
