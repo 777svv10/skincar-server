@@ -3,7 +3,7 @@ import {transaction,problem} from './generations.js';
 const proposed=[{id:'start',name:'START',count:1,price:40},{id:'boost',name:'BOOST',count:5,price:175},{id:'pro',name:'PRO',count:12,price:390}];
 export function catalog(userId,config=process.env){
  const mode=config.PAYMENTS_MODE||'pilot';
- const testers=(config.PAYMENT_TESTER_IDS||'306179287,705535713').split(',').map(x=>x.trim());
+ const testers=(config.PAYMENT_TESTER_IDS||'').split(',').map(x=>x.trim());
  return {mode,packs:mode==='live'?proposed:mode==='pilot'&&testers.includes(String(userId))?[{id:'test',name:'TEST',count:1,price:1}]:[]};
 }
 export async function createInvoice(db,userId,packId,telegram,config=process.env){

@@ -56,3 +56,5 @@ const botHousekeeping=async()=>{
  }catch(e){console.error('Bot housekeeping failed',e.code||e.name);}
 };
 setInterval(botHousekeeping,6*3600000).unref();
+// SK-110: retain rate-limit counters briefly, avoid unbounded metadata growth.
+setInterval(()=>db.query("DELETE FROM api_rate_limits WHERE window_start<now()-interval '3 hours'").catch(e=>console.error('API rate housekeeping failed',e.code||e.name)),3600000).unref();

@@ -204,3 +204,14 @@ CREATE TABLE IF NOT EXISTS bot_callback_receipts (
  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS bot_callback_receipts_expiry ON bot_callback_receipts(received_at);
+
+-- SK-110: globally shared, bounded API rate-limit counters (never raw Telegram IDs).
+CREATE TABLE IF NOT EXISTS api_rate_limits (
+ scope TEXT NOT NULL,
+ actor_hash TEXT NOT NULL,
+ period_seconds INTEGER NOT NULL CHECK(period_seconds IN (60,3600)),
+ window_start TIMESTAMPTZ NOT NULL,
+ hits INTEGER NOT NULL DEFAULT 1 CHECK(hits>=1),
+ PRIMARY KEY(scope,actor_hash,period_seconds,window_start)
+);
+CREATE INDEX IF NOT EXISTS api_rate_limits_expiration ON api_rate_limits(window_start);

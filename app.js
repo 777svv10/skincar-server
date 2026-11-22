@@ -11,18 +11,29 @@ import {listDrafts,saveDraft,deleteDraft} from './drafts.js';
 import {vehicleMetadata,vehicleView} from './vehicle-metadata.js';
 import {findSavedUpload} from './upload-status.js';
 import {createBotService,telegramMultipart} from './bot-service.js';
+import {newRequestId,routeFamily,traceEvent,ratePolicy,consumeApiLimit,allowAnonymousAuth,tooMany} from './api-security.js';
 export function createHandler(db,config=process.env){
 const {BOT_TOKEN,WEBHOOK_SECRET}=config;
 const APP_URL=config.APP_URL||'https://skincar01.netlify.app/';
 const ORIGIN=new URL(APP_URL).origin;
 const digest=s=>createHash('sha256').update(s).digest('hex');
-const reply=(res,status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data))};
+const reply=(res,status,data)=>{
+ if(status>=400&&!res.skLogged)console.warn(traceEvent('api_rejection',res.skRequestId,res.skRoute||'other',status,data?.code||'UNSPECIFIED'));
+ const payload=data&&typeof data==='object'&&!Array.isArray(data)?{...data,requestId:res.skRequestId}:data;
+ res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});
+ res.end(JSON.stringify(payload));
+};
 async function body(req,limit=32768){let size=0,parts=[];for await(const chunk of req){size+=chunk.length;if(size>limit)throw Object.assign(Error('Body too large'),{status:413,code:'BODY_TOO_LARGE'});parts.push(chunk)}try{const value=JSON.parse(Buffer.concat(parts).toString()||'{}');if(!value||typeof value!=='object'||Array.isArray(value))throw Error();return value;}catch{throw Object.assign(Error('Invalid JSON'),{status:400,code:'INVALID_JSON'})}}
 async function telegram(method,data){const r=await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),signal:AbortSignal.timeout(10000)});const json=await r.json();if(!json.ok)throw Error('Telegram request failed');return json.result}
 const botService=createBotService({db,config,send:telegram,upload:(method,data)=>telegramMultipart(BOT_TOKEN,method,data)});
 const view=u=>({id:u.telegram_id,displayName:u.display_name,lang:u.lang,theme:u.theme,balance:u.balance,nickname:u.nickname,nicknameRequired:!u.nickname,suggestedNickname:normalizeNickname(u.telegram_username)});
 return async(req,res)=>{
   const path=new URL(req.url,'http://localhost').pathname;
+  res.skRequestId=newRequestId();res.skRoute=routeFamily(path);
+  res.setHeader('X-Request-ID',res.skRequestId);
+  res.setHeader('Access-Control-Expose-Headers','X-Request-ID, Retry-After');
+  res.setHeader('Referrer-Policy','no-referrer');
+  res.setHeader('X-Content-Type-Options','nosniff');
   if(req.headers.origin&&req.headers.origin!==ORIGIN)return reply(res,403,{error:'Origin denied'});
   if(req.headers.origin===ORIGIN){res.setHeader('Access-Control-Allow-Origin',ORIGIN);res.setHeader('Vary','Origin')}
   res.setHeader('X-Content-Type-Options','nosniff');
@@ -49,8 +60,10 @@ return async(req,res)=>{
       return reply(res,200,{ok:true});
     }
     if(path==='/api/auth/telegram'&&req.method==='POST'){
+      if(!allowAnonymousAuth(req.socket?.remoteAddress))throw tooMany(60);
       const b=await body(req);let user;
       try{user=validateInitData(b.initData,BOT_TOKEN)}catch{return reply(res,401,{error:'Открой приложение заново через Telegram'})}
+      await consumeApiLimit(db,'auth',user.id);
       const lang=['ru','kk','en'].includes(user.language_code)?user.language_code:'ru';
       const {rows}=await db.query(`INSERT INTO users(telegram_id,display_name,lang,telegram_username) VALUES($1,$2,$3,$4) ON CONFLICT(telegram_id) DO UPDATE SET telegram_username=EXCLUDED.telegram_username,updated_at=now() RETURNING *`,[user.id,String(user.first_name||'SkinCar User').slice(0,80),lang,typeof user.username==='string'?user.username.slice(0,64):null]);
       const session=randomBytes(32).toString('hex');
@@ -63,6 +76,8 @@ return async(req,res)=>{
     if(!bearer)return reply(res,401,{error:'Login required'});
     const {rows}=await db.query(`SELECT u.* FROM sessions s JOIN users u USING(telegram_id) WHERE s.token_hash=$1 AND s.expires_at>now()`,[digest(bearer[1])]);
     const user=rows[0];if(!user)return reply(res,401,{error:'Session expired'});
+    const policy=ratePolicy(path,req.method);
+    if(policy)await consumeApiLimit(db,policy,user.telegram_id);
     if(path==='/api/wheels/availability'&&req.method==='GET')return reply(res,200,wheelAccess(config,user.telegram_id));
     if(path==='/api/films/availability'&&req.method==='GET')return reply(res,200,filmAccess(config,user.telegram_id));
     if(path==='/api/payments/catalog'&&req.method==='GET')return reply(res,200,catalog(user.telegram_id,config));
@@ -270,6 +285,12 @@ return async(req,res)=>{
     }
     if(path==='/api/logout'&&req.method==='POST'){await db.query('DELETE FROM sessions WHERE token_hash=$1',[digest(bearer[1])]);return reply(res,200,{ok:true})}
     return reply(res,404,{error:'Not found'});
-  }catch(error){console.error('Request failed:',error.code||error.name);return reply(res,error.status||500,{error:error.status?error.code:'Server error',code:error.status?error.code:'SERVER_ERROR'})}
+  }catch(error){
+    if(error.retryAfter)res.setHeader('Retry-After',String(error.retryAfter));
+    const status=error.status||500,code=error.status?error.code:'SERVER_ERROR';
+    console.error(traceEvent('api_exception',res.skRequestId,res.skRoute||'other',status,code));
+    res.skLogged=true;
+    return reply(res,status,{error:error.status?error.code:'Server error',code});
+  }
 };
 }
