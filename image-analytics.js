@@ -74,6 +74,7 @@ export const ANALYTICS_PERIODS=Object.freeze({today:'1 day',week:'7 days',month:
 export const periodLabel=period=>({today:'24 часа',week:'7 дней',month:'30 дней',quarter:'90 дней',year:'365 дней',all:'всё время'})[period]||'—';
 export function periodFilter(period,column='created_at'){
  if(!Object.hasOwn(ANALYTICS_PERIODS,period))throw Error('SK108_RANGE_INVALID');
+ // SQL column names are internal literals only, never taken from Telegram or user input.
  if(column!=='created_at'&&column!=='g.created_at')throw Error('SK108_COLUMN_INVALID');
  const interval=ANALYTICS_PERIODS[period];
  return interval?{where:`WHERE ${column}>=now()-($1::interval)`,params:[interval]}:{where:'',params:[]};
@@ -88,6 +89,7 @@ export async function loadGenerationExport(db,period='month',config={}){
 }
 const escapeCsv=value=>{
  let s=String(value??'').replaceAll('\r',' ').replaceAll('\n',' ').replaceAll('\0','');
+ // Prevent spreadsheet formula execution when an export is opened in Excel/Sheets.
  if(/^[\s]*[=+@-]/.test(s))s="'"+s;
  return `"${s.replaceAll('"','""')}"`;
 };

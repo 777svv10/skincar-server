@@ -62,15 +62,23 @@ return async(req,res)=>{
     }
     if(path==='/api/auth/telegram'&&req.method==='POST'){
       if(!allowAnonymousAuth(req.socket?.remoteAddress))throw tooMany(60);
+      res.skAuthStage='payload';
       const b=await body(req);let user;
+      res.skAuthStage='telegram_signature';
       try{user=validateInitData(b.initData,BOT_TOKEN)}catch{return reply(res,401,{error:'Открой приложение заново через Telegram'})}
+      res.skAuthStage='auth_limit';
       await consumeApiLimit(db,'auth',user.id);
+      res.skAuthStage='user_upsert';
       const lang=['ru','kk','en'].includes(user.language_code)?user.language_code:'ru';
       const {rows}=await db.query(`INSERT INTO users(telegram_id,display_name,lang,telegram_username) VALUES($1,$2,$3,$4) ON CONFLICT(telegram_id) DO UPDATE SET telegram_username=EXCLUDED.telegram_username,updated_at=now() RETURNING *`,[user.id,String(user.first_name||'SkinCar User').slice(0,80),lang,typeof user.username==='string'?user.username.slice(0,64):null]);
       const session=randomBytes(32).toString('hex');
+      res.skAuthStage='session_insert';
       await db.query(`INSERT INTO sessions(token_hash,telegram_id) VALUES($1,$2)`,[digest(session),user.id]);
+      res.skAuthStage='pilot_grant';
       await grantPilot(db,user.id);
+      res.skAuthStage='profile_refresh';
       const fresh=(await db.query('SELECT * FROM users WHERE telegram_id=$1',[user.id])).rows[0];
+      res.skAuthStage='complete';
       return reply(res,200,{session,user:view(fresh),expiresIn:86400});
     }
     const bearer=/^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization||'');
@@ -294,7 +302,14 @@ return async(req,res)=>{
   }catch(error){
     if(error.retryAfter)res.setHeader('Retry-After',String(error.retryAfter));
     const status=error.status||500,code=error.status?error.code:'SERVER_ERROR';
-    console.error(traceEvent('api_exception',res.skRequestId,res.skRoute||'other',status,code));
+    // Auth failures log only a fixed stage and PostgreSQL SQLSTATE, never SQL, account IDs or secrets.
+    const event=JSON.parse(traceEvent('api_exception',res.skRequestId,res.skRoute||'other',status,code));
+    if(res.skRoute==='auth'){
+      const stages=['payload','telegram_signature','auth_limit','user_upsert','session_insert','pilot_grant','profile_refresh','complete'];
+      event.authStage=stages.includes(res.skAuthStage)?res.skAuthStage:'unknown';
+      if(typeof error?.code==='string'&&/^[0-9A-Z]{5}$/.test(error.code))event.sqlState=error.code;
+    }
+    console.error(JSON.stringify(event));
     res.skLogged=true;
     return reply(res,status,{error:error.status?error.code:'Server error',code});
   }

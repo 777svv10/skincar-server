@@ -46,7 +46,7 @@ export async function consumeApiLimit(db,policy,actor){
  for(const [period,max] of RATE_LIMITS[policy]){
   // Atomic global limit across multiple Railway replicas, no check-then-write race.
   const r=await db.query(`INSERT INTO api_rate_limits(scope,actor_hash,period_seconds,window_start,hits)
-   VALUES($1,$2,$3,to_timestamp(floor(extract(epoch from now())/$3)*$3),1)
+   VALUES($1,$2,$3,to_timestamp((floor(extract(epoch from now()) / $3::numeric) * $3::numeric)::double precision),1)
    ON CONFLICT(scope,actor_hash,period_seconds,window_start)
    DO UPDATE SET hits=api_rate_limits.hits+1 WHERE api_rate_limits.hits<$4
    RETURNING hits`,[policy,hash,period,max]);
