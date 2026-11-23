@@ -44,11 +44,15 @@ export async function consumeApiLimit(db,policy,actor){
  if(!Object.hasOwn(RATE_LIMITS,policy))throw Error('UNKNOWN_RATE_POLICY');
  const hash=hashActor('sk110:'+policy,actor);
  for(const [period,max] of RATE_LIMITS[policy]){
+  // SK-111.2: keep PostgreSQL placeholders one consistent type each.
+  // SQLSTATE 42P08 (ambiguous_parameter) previously blocked every Telegram login.
+  // Both durations come exclusively from RATE_LIMITS: UTC minute/hour-aligned windows.
+  const windowStart=period===60?"date_trunc('minute', now())":"date_trunc('hour', now())";
   // Atomic global limit across multiple Railway replicas, no check-then-write race.
   const r=await db.query(`INSERT INTO api_rate_limits(scope,actor_hash,period_seconds,window_start,hits)
-   VALUES($1,$2,$3,to_timestamp((floor(extract(epoch from now()) / $3::numeric) * $3::numeric)::double precision),1)
+   VALUES($1::text,$2::text,$3::integer,${windowStart},1)
    ON CONFLICT(scope,actor_hash,period_seconds,window_start)
-   DO UPDATE SET hits=api_rate_limits.hits+1 WHERE api_rate_limits.hits<$4
+   DO UPDATE SET hits=api_rate_limits.hits+1 WHERE api_rate_limits.hits<$4::integer
    RETURNING hits`,[policy,hash,period,max]);
   if(!r.rowCount)throw tooMany(period);
  }
